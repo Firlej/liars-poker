@@ -133,6 +133,7 @@
 		// Handle game update event
 		socket.on('game_update', function(data) {
 			$('#gameArea').append('<br> Game Update: ' + data.text);
+			$('#gameArea').append('<br> Game State json: ' + JSON.stringify(data.json));
 			// Additional logic to display game update details
 		});
 

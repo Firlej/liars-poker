@@ -139,7 +139,16 @@ class Game:
         self.player_turn_index = (self.player_turn_index + 1) % len(self.players)
         
         self.emit('game_update', {
-            'text': f"Player {current_player.sid} bets {bet}"
+            'text': f"Player {current_player.sid} bets {bet}",
+            'json': {
+                'current_player': current_player.sid,
+                'last_bet': self.last_bet,
+                'player_turn_index': self.player_turn_index,
+                'players_sids': [p.sid for p in self.players],
+                'players_hand_counts': dict((p.sid, p.hand_count) for p in self.players),
+                'deal_in_progress': self.deal_in_progess,
+                'game_finished': self.game_finished
+            }
         })
         
         return
