@@ -40,7 +40,7 @@ class Game:
         self.deal_in_progess = False
         self.game_finished = False
         
-        self.emit('game_start', {'players': sids})
+        self.emit('game_start', {'players': sids, 'room_name': self.room})
         
     def emit(self, event, data = {}, to = None):
         
