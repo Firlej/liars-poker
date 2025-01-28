@@ -12,9 +12,10 @@ class Player:
         self.hand_count = hand_count
         self.hand = hand
         self.solver = solver
+        self.last_bet = None
         
     def __repr__(self) -> str:
-        return f"Player(sid={self.sid}, hand_count={self.hand_count}, hand={self.hand}, solver={self.solver})"
+        return f"Player(sid={self.sid}, hand_count={self.hand_count}, last_bet={self.last_bet}, hand={self.hand}, solver={self.solver})"
     
 
 class Game:
@@ -60,6 +61,11 @@ class Game:
         n = len(self.cards.cards)
         
         # print([n for n in self.cards.combinations.keys()])
+
+        # Reset all players' last bets
+        for player in self.players:
+            player.last_bet = None
+            
         player_hand_counts = { p.sid: p.hand_count for p in self.players}
         
         for player, hand in zip(self.players, hands):
@@ -136,16 +142,17 @@ class Game:
             return
         
         self.last_bet = bet
+        current_player.last_bet = bet
         self.player_turn_index = (self.player_turn_index + 1) % len(self.players)
         
         self.emit('game_update', {
             'text': f"Player {current_player.sid} bets {bet}",
             'json': {
+                'action': 'bet',
                 'current_player': current_player.sid,
                 'last_bet': self.last_bet,
                 'player_turn_index': self.player_turn_index,
-                'players_sids': [p.sid for p in self.players],
-                'players_hand_counts': dict((p.sid, p.hand_count) for p in self.players),
+                'players': [{'sid': p.sid, 'hand_count': p.hand_count, 'last_bet': p.last_bet} for p in self.players],
                 'deal_in_progress': self.deal_in_progess,
                 'game_finished': self.game_finished
             }
