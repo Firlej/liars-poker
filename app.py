@@ -37,27 +37,33 @@ def connect():
     # print(users)
 
 @socketio.on("play")
-def play(data = None):
-    
+def play(data=None):
+    global queue
+    if data and 'username' in data:
+        username = data['username']
+    else:
+        username = request.sid[-4:]
+
     # TODO check if player is not in a game currently
     
-    if request.sid not in queue:
-        queue.append(request.sid)
+    if request.sid not in [sid for sid, _ in queue]:
+        queue.append((request.sid, username))
         
     print("play", request.sid[-4:], queue)
     
     if len(queue) >= 2:
         
-        sids = queue[:2]
+        sids = [sid for sid, _ in queue[:2]]
+        usernames = [username for _, username in queue[:2]]
         
         room = get_room_name()
         
         print(f"Adding {sids} to room {room}")
         for sid in sids:
             join_room(room = room, sid = sid)
-            queue.remove(sid)
+            queue = [item for item in queue if item[0] != sid]
             
-        game = Game(sids = sids, room = room)
+        game = Game(sids = sids, room = room, usernames = usernames)
         game.deal()
             
         games[room] = game
@@ -88,8 +94,7 @@ def bet(data):
 @socketio.on("disconnect")
 def disconnect():
     users.remove(request.sid)
-    if request.sid in queue:
-        queue.remove(request.sid)
+    queue = [item for item in queue if item[0] != request.sid]
     # TODO remove from games
     print("disconnect", request.sid[-4:])
 

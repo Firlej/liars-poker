@@ -1,4 +1,4 @@
-from typing import List, Dict
+from typing import List
 from Deck import Deck
 from collections import namedtuple
 from flask_socketio import emit
@@ -7,12 +7,13 @@ import random
 from Solver import Solver, combinations# Player = namedtuple("Player", ["name", "hand", "solver"])
 
 class Player:
-    def __init__(self, sid, hand_count, hand=None, solver=None):
+    def __init__(self, sid, hand_count, username, hand=None, solver=None):
         self.sid = sid
         self.hand_count = hand_count
         self.hand = hand
         self.solver = solver
         self.last_bet = None
+        self.username = username
         
     def __repr__(self) -> str:
         return f"Player(sid={self.sid}, hand_count={self.hand_count}, last_bet={self.last_bet}, hand={self.hand}, solver={self.solver})"
@@ -20,27 +21,32 @@ class Player:
 
 class Game:
     
-    def __init__(self, sids: List[str], room: str):
+    def __init__(self, sids: List[str], room: str, usernames: List[str]):
         
+        print("usernames", usernames)
         self.room = room
         self.sids = sids
+        self.usernames = usernames
             
         self.players: List[Player] = [
             Player(
                 sid = sid,
                 hand_count = 1,
                 hand = None,
-                solver = None
+                solver = None,
+                username = usernames[i]
             )
-            for sid in sids
+            for i, sid in enumerate(sids)
         ]
         
         self.player_turn_index = 0
         
         self.deal_in_progess = False
         self.game_finished = False
+
+        print("players", self.players)
         
-        self.emit('game_start', {'players': sids, 'room_name': self.room})
+        self.emit('game_start', {'sids': sids, 'usernames': usernames, 'room_name': self.room})
         
     def emit(self, event, data = {}, to = None):
         
@@ -82,7 +88,7 @@ class Game:
                     'action': 'new_deal',
                     'last_bet': None,
                     'player_turn_index': self.player_turn_index,
-                    'players': [{'sid': p.sid, 'hand_count': p.hand_count, 'last_bet': p.last_bet} for p in self.players],
+                    'players': [{'sid': p.sid, 'username': p.username, 'hand_count': p.hand_count, 'last_bet': p.last_bet} for p in self.players],
                     'deal_in_progress': self.deal_in_progess,
                     'game_finished': self.game_finished
                 }
@@ -160,7 +166,7 @@ class Game:
                 'current_player': current_player.sid,
                 'last_bet': self.last_bet,
                 'player_turn_index': self.player_turn_index,
-                'players': [{'sid': p.sid, 'hand_count': p.hand_count, 'last_bet': p.last_bet} for p in self.players],
+                'players': [{'sid': p.sid, 'username': p.username, 'hand_count': p.hand_count, 'last_bet': p.last_bet} for p in self.players],
                 'deal_in_progress': self.deal_in_progess,
                 'game_finished': self.game_finished
             }
