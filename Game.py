@@ -77,7 +77,15 @@ class Game:
             self.emit('game_update', {
                 'text': f"New deal! your hand: {p.hand} | {player_hand_counts=}",
                 'your_hand': p.hand,
-                'player_hand_counts': player_hand_counts
+                'player_hand_counts': player_hand_counts,
+                'json': {
+                    'action': 'new_deal',
+                    'last_bet': None,
+                    'player_turn_index': self.player_turn_index,
+                    'players': [{'sid': p.sid, 'hand_count': p.hand_count, 'last_bet': p.last_bet} for p in self.players],
+                    'deal_in_progress': self.deal_in_progess,
+                    'game_finished': self.game_finished
+                }
             }, to = p.sid)
         
         self.last_bet = None
