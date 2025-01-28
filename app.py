@@ -50,6 +50,7 @@ def play(data=None):
         queue.append((request.sid, username))
         
     print("play", request.sid[-4:], queue)
+    socketio.emit("queue_update", {'queue': queue})
     
     if len(queue) >= 2:
         
