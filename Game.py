@@ -90,7 +90,8 @@ class Game:
                     'player_turn_index': self.player_turn_index,
                     'players': [{'sid': p.sid, 'username': p.username, 'hand_count': p.hand_count, 'last_bet': p.last_bet} for p in self.players],
                     'deal_in_progress': self.deal_in_progess,
-                    'game_finished': self.game_finished
+                    'game_finished': self.game_finished,
+                    'your_hand': p.hand
                 }
             }, to = p.sid)
         
