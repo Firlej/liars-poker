@@ -7,7 +7,7 @@ from Game import Game
 logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
 app = Flask(__name__)
-socketio = SocketIO(app)
+socketio = SocketIO(app, cors_allowed_origins="*")
 
 
 @app.route("/")
@@ -30,11 +30,12 @@ def get_room_name():
 
 @socketio.on("connect")
 def connect():
-    # print('connect', request.sid, request.__dict__.keys())
-    users.add(request.sid)
-    print("connect", request.sid[-4:])
-    emit("connected", {'sid': request.sid}, sid = request.sid)
-    # print(users)
+    try:
+        users.add(request.sid)
+        print("connect", request.sid[-4:])
+        emit("connected", {'sid': request.sid}, sid=request.sid)
+    except Exception as e:
+        print(f"Connection error for {request.sid[-4:]}: {e}")
 
 @socketio.on("play")
 def play(data=None):
@@ -48,6 +49,7 @@ def play(data=None):
     
     if request.sid not in [sid for sid, _ in queue]:
         queue.append((request.sid, username))
+        socketio.emit("you_joined_queue", {'your_sid': request.sid}, to=request.sid)
         
     print("play", request.sid[-4:], queue)
     socketio.emit("queue_update", {'queue': queue})
@@ -93,12 +95,26 @@ def bet(data):
 
 
 @socketio.on("disconnect")
-def disconnect():
+def disconnect(data=None):
+    global queue
     users.remove(request.sid)
     queue = [item for item in queue if item[0] != request.sid]
-    # TODO remove from games
+    
+    # Remove player from any active games
+    game_to_remove = None
+    for room, game in games.items():
+        if request.sid in game.sids:
+            close_room(game.room)
+            game_to_remove = room
+            break
+            
+    if game_to_remove:
+        del games[game_to_remove]
+        
     print("disconnect", request.sid[-4:])
 
 
 if __name__ == "__main__":
-    socketio.run(app = app, host='0.0.0.0', port=5001)
+    import os
+    port = int(os.environ.get("PORT", 4000))
+    socketio.run(app = app, host='0.0.0.0', port=port, debug=True)
