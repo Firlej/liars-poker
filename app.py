@@ -94,7 +94,29 @@ def bet(data):
     if not game.deal_in_progess:
         game.deal()
 
-
+@socketio.on("leave_game")
+def leave_game():
+    global queue
+    print("leave_game", request.sid[-4:])
+    # Find the game the player is in
+    game: Game = next(filter(lambda g: request.sid in g.sids, games.values()), None)
+    
+    if game is None:
+        emit("message", {'text': "You're not in any game to leave"}, sid=request.sid)
+        return
+    
+    # Remove player from the game room
+    leave_room(room=game.room, sid=request.sid)
+    
+    # Notify other players
+    emit("game_update", {'sid': request.sid, 'text': f"{next(p.username for p in game.players if p.sid == request.sid)} left the game. Room is closed."}, room=game.room)
+    
+    # Close the game and clean up
+    close_room(game.room)
+    queue = []
+    del games[game.room]
+    
+    print(f"Player {request.sid[-4:]} left game {game.room}")
 
 @socketio.on("disconnect")
 def disconnect(data=None):
@@ -106,7 +128,9 @@ def disconnect(data=None):
     game_to_remove = None
     for room, game in games.items():
         if request.sid in game.sids:
+            emit("game_update", {'sid': request.sid, 'text': f"{next(p.username for p in game.players if p.sid == request.sid)} left the game. Room is closed."}, room=game.room)
             close_room(game.room)
+            queue = []
             game_to_remove = room
             break
             
