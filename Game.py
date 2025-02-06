@@ -81,7 +81,7 @@ class Game:
         for p in self.players:
         
             self.emit('game_update', {
-                'text': f"New deal! your hand: {p.hand} | {player_hand_counts=}",
+                'text': f"New deal! Your hand: {p.hand}",
                 'your_hand': p.hand,
                 'player_hand_counts': player_hand_counts,
                 'json': {
@@ -123,7 +123,16 @@ class Game:
                 return
         
             self.emit('game_update', {
-                'text': f"Player {current_player.sid} checks!"
+                'text': f"{current_player.username} checks!",
+                'json': {
+                    'action': 'check',
+                    'current_player': current_player.sid,
+                    'last_bet': self.last_bet,
+                    'player_turn_index': self.player_turn_index,
+                    'players': [{'sid': p.sid, 'username': p.username, 'hand_count': p.hand_count, 'last_bet': p.last_bet} for p in self.players],
+                    'deal_in_progress': self.deal_in_progess,
+                    'game_finished': self.game_finished
+                }
             })
                     
             loser_player_index = self.player_turn_index
@@ -161,7 +170,7 @@ class Game:
         self.player_turn_index = (self.player_turn_index + 1) % len(self.players)
         
         self.emit('game_update', {
-            'text': f"Player {current_player.sid} bets {bet}",
+            'text': f"{current_player.username} bets {bet}",
             'json': {
                 'action': 'bet',
                 'current_player': current_player.sid,
@@ -182,7 +191,7 @@ class Game:
         MAX_CARDS = 3
         
         self.emit('game_update', {
-            'text': f"Player {loser.sid} lost the deal!"
+            'text': f"{loser.username} lost the deal!"
         })
         
         player_cards = [[p.sid, p.hand] for p in self.players]
@@ -190,7 +199,7 @@ class Game:
         if loser.hand_count > MAX_CARDS:
         
             self.emit('game_update', {
-                'text': f"Player {loser.sid} is out!"
+                'text': f"{loser.username} is out!"
             })
             
             del self.players[loser_player_index]
@@ -198,7 +207,7 @@ class Game:
         if len(self.players) <= 1:
             winner = self.players[0]
             self.emit('game_update', {
-                'text': f"Player {winner.sid} won!"
+                'text': f"{winner.username} won!"
             })
             self.game_finished = True
             return
