@@ -44,8 +44,6 @@ def play(data=None):
         username = data['username']
     else:
         username = request.sid[-4:]
-
-    # TODO check if player is not in a game currently
     
     if request.sid not in [sid for sid, _ in queue]:
         queue.append((request.sid, username))
@@ -54,22 +52,25 @@ def play(data=None):
     print("play", request.sid[-4:], queue)
     socketio.emit("queue_update", {'queue': queue})
     
-    if len(queue) >= 2:
+@socketio.on("start_game")
+def start_game():
+    sids = [sid for sid, _ in queue]
+    usernames = [username for _, username in queue]
+    
+    room = get_room_name()
+    
+    print(f"Adding {sids} to room {room}")
+    for sid in sids:
+        join_room(room = room, sid = sid)
+        queue = [item for item in queue if item[0] != sid]
         
-        sids = [sid for sid, _ in queue[:2]]
-        usernames = [username for _, username in queue[:2]]
+    game = Game(sids = sids, room = room, usernames = usernames)
+    game.deal()
         
-        room = get_room_name()
-        
-        print(f"Adding {sids} to room {room}")
-        for sid in sids:
-            join_room(room = room, sid = sid)
-            queue = [item for item in queue if item[0] != sid]
-            
-        game = Game(sids = sids, room = room, usernames = usernames)
-        game.deal()
-            
-        games[room] = game
+    games[room] = game
+
+    queue = []
+    socketio.emit("queue_update", {'queue': queue})
 
 @socketio.on("bet")
 def bet(data):
