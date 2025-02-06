@@ -54,6 +54,7 @@ def play(data=None):
     
 @socketio.on("start_game")
 def start_game():
+    global queue
     sids = [sid for sid, _ in queue]
     usernames = [username for _, username in queue]
     
