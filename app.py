@@ -21,10 +21,11 @@ queue = []
 
 game_index = 0
 games = {}
+manual_rooms = {}  # {room_id: {'players': [(sid, username)], 'created_by': sid, 'creator_username': str}}
 
 def get_room_name():
     global game_index
-    room_name = f"Game #{game_index}"
+    room_name = f"Room-{game_index}"
     game_index += 1
     return room_name
 
@@ -87,6 +88,200 @@ def clear_queue():
 
     print("Queue cleared")
 
+@socketio.on("create_room")
+def create_room(data=None):
+    """Create a manual room - creator is automatically added"""
+    username = data.get('username', request.sid[-4:]) if data else request.sid[-4:]
+
+    print(f"create_room called by {request.sid[-4:]} ({username})")
+    print(f"Current manual_rooms: {list(manual_rooms.keys())}")
+
+    # Check if user already created a room
+    for room_id, room_data in manual_rooms.items():
+        if room_data['created_by'] == request.sid:
+            error_msg = "You already have an active room. Leave it before creating a new one."
+            print(f"ERROR: User {request.sid[-4:]} tried to create multiple rooms. Existing room: {room_id}")
+            emit("error", {'message': error_msg, 'event': 'create_room'}, to=request.sid)
+            return
+
+    room_id = get_room_name()
+    print(f"Creating new room {room_id} for {request.sid[-4:]}")
+
+    # Create room with creator as first player
+    manual_rooms[room_id] = {
+        'players': [(request.sid, username)],
+        'created_by': request.sid,
+        'creator_username': username
+    }
+
+    # Join creator to socket.io room
+    join_room(room=room_id, sid=request.sid)
+
+    print(f"Room {room_id} created by {username} ({request.sid[-4:]})")
+
+    # Send you_joined_queue so frontend knows their sid for game logic
+    emit("you_joined_queue", {'your_sid': request.sid}, to=request.sid)
+
+    # Notify the creator
+    emit("room_created", {
+        'roomId': room_id,
+        'roomName': room_id
+    }, sid=request.sid)
+
+    # Broadcast updated room list to all clients
+    socketio.emit("rooms_update", {'rooms': get_rooms_list()})
+
+@socketio.on("join_manual_room")
+def join_manual_room(data):
+    """Join a specific manual room"""
+    room_id = data.get('roomId')
+    username = data.get('username', request.sid[-4:])
+
+    # Validate room exists
+    if not room_id or room_id not in manual_rooms:
+        emit("error", {'message': f"Room does not exist"}, sid=request.sid)
+        return
+
+    room_data = manual_rooms[room_id]
+
+    # Check if already in room (allow re-join)
+    already_in_room = any(sid == request.sid for sid, _ in room_data['players'])
+
+    if not already_in_room:
+        # Add player to room
+        room_data['players'].append((request.sid, username))
+        print(f"{username} ({request.sid[-4:]}) joined room {room_id}")
+    else:
+        print(f"{username} ({request.sid[-4:]}) re-joining room {room_id}")
+
+    # Join socket.io room (idempotent)
+    join_room(room=room_id, sid=request.sid)
+
+    # Send you_joined_queue so frontend knows their sid for game logic
+    emit("you_joined_queue", {'your_sid': request.sid}, to=request.sid)
+
+    # Notify the player who joined
+    emit("joined_room", {
+        'roomId': room_id,
+        'roomName': room_id,
+        'players': room_data['players'],
+        'isCreator': room_data['created_by'] == request.sid,
+        'creatorSid': room_data['created_by']
+    }, sid=request.sid)
+
+    # Only broadcast if new player (not re-join)
+    if not already_in_room:
+        # Notify all players in the room
+        socketio.emit("room_update", {
+            'roomName': room_id,
+            'players': room_data['players'],
+            'creatorSid': room_data['created_by']
+        }, room=room_id)
+
+        # Update rooms list for everyone
+        socketio.emit("rooms_update", {'rooms': get_rooms_list()})
+
+@socketio.on("remove_player_from_room")
+def remove_player_from_room(data):
+    """Remove a player from a manual room (creator only)"""
+    room_id = data.get('roomId')
+    player_sid = data.get('playerId')
+
+    if not room_id or not player_sid:
+        emit("error", {'message': "Room ID and player ID are required"}, sid=request.sid)
+        return
+
+    if room_id not in manual_rooms:
+        emit("error", {'message': f"Room {room_id} does not exist"}, sid=request.sid)
+        return
+
+    room_data = manual_rooms[room_id]
+
+    # Check if the requester is the room creator
+    if room_data['created_by'] != request.sid:
+        emit("error", {'message': "Only the room creator can remove players"}, sid=request.sid)
+        return
+
+    # Check if the player is in the room
+    player_to_remove = None
+    for sid, username in room_data['players']:
+        if sid == player_sid:
+            player_to_remove = (sid, username)
+            break
+
+    if not player_to_remove:
+        emit("error", {'message': "Player is not in this room"}, sid=request.sid)
+        return
+
+    # Remove the player
+    room_data['players'].remove(player_to_remove)
+    removed_username = player_to_remove[1]
+
+    print(f"Player {player_sid[-4:]} ({removed_username}) removed from room {room_id} by creator")
+
+    # Notify the removed player
+    print(f"Sending removed_from_room to removed player {player_sid[-4:]}")
+    emit("removed_from_room", {
+        'roomId': room_id,
+        'reason': f"You were removed from the room by the creator"
+    }, to=player_sid)
+
+    # Notify the creator
+    print(f"Sending player_removed to creator {request.sid[-4:]}")
+    emit("player_removed", {
+        'playerId': player_sid,
+        'playerName': removed_username
+    }, to=request.sid)
+
+    # Notify all remaining players in the room
+    socketio.emit("room_update", {
+        'roomName': room_id,
+        'players': room_data['players'],
+        'creatorSid': room_data['created_by']
+    }, room=room_id)
+
+    # Broadcast updated room list to all clients
+    socketio.emit("rooms_update", {'rooms': get_rooms_list()})
+
+@socketio.on("start_manual_room_game")
+def start_manual_room_game(data):
+    """Start game from manual room"""
+    room_id = data.get('roomId')
+
+    # Validate room exists
+    if not room_id or room_id not in manual_rooms:
+        emit("error", {'message': "Room does not exist"}, sid=request.sid)
+        return
+
+    room_data = manual_rooms[room_id]
+
+    # Only creator can start
+    if room_data['created_by'] != request.sid:
+        emit("error", {'message': "Only room creator can start the game"}, sid=request.sid)
+        return
+
+    # Need at least 2 players
+    if len(room_data['players']) < 2:
+        emit("error", {'message': "Need at least 2 players to start"}, sid=request.sid)
+        return
+
+    # Extract player data
+    sids = [sid for sid, _ in room_data['players']]
+    usernames = [username for _, username in room_data['players']]
+
+    print(f"Starting game in room {room_id} with {len(sids)} players")
+
+    # Create and start the game
+    game = Game(sids=sids, room=room_id, usernames=usernames)
+    game.deal()
+    games[room_id] = game
+
+    # Remove room from manual_rooms (game is now active)
+    del manual_rooms[room_id]
+
+    # Update rooms list for everyone
+    socketio.emit("rooms_update", {'rooms': get_rooms_list()})
+
 @socketio.on("bet")
 def bet(data):
     print("bet", request.sid[-4:], data)
@@ -111,6 +306,67 @@ def bet(data):
 @socketio.on("leave_game")
 def leave_game():
     print("leave_game", request.sid[-4:])
+
+    # First check if player is in a manual room (not yet started game)
+    player_room_id = None
+    for room_id, room_data in manual_rooms.items():
+        if any(sid == request.sid for sid, _ in room_data['players']):
+            player_room_id = room_id
+            break
+
+    if player_room_id:
+        # Player is in a manual room
+        room_data = manual_rooms[player_room_id]
+        is_creator = room_data['created_by'] == request.sid
+        player_username = next((username for sid, username in room_data['players'] if sid == request.sid), 'Unknown')
+
+        print(f"Player {request.sid[-4:]} ({player_username}) leaving room {player_room_id} (is_creator: {is_creator})")
+
+        # If room creator is leaving, notify other players BEFORE modifying the room
+        if is_creator:
+            print(f"Room creator leaving {player_room_id}, notifying all players")
+            # Get list of other players to notify
+            other_players = [sid for sid, _ in room_data['players'] if sid != request.sid]
+            print(f"Notifying {len(other_players)} other players: {[sid[-4:] for sid in other_players]}")
+
+            # Notify each player individually to be sure they get it
+            for player_sid in other_players:
+                emit("removed_from_room", {
+                    'roomId': player_room_id,
+                    'reason': "Room creator left the room"
+                }, to=player_sid)
+                print(f"Sent removed_from_room to {player_sid[-4:]}")
+
+        # Remove player from room
+        room_data['players'] = [p for p in room_data['players'] if p[0] != request.sid]
+        print(f"Player removed. Remaining players: {len(room_data['players'])}")
+
+        # Leave socket.io room
+        leave_room(room=player_room_id, sid=request.sid)
+
+        # If room creator left, delete the room
+        if is_creator:
+            del manual_rooms[player_room_id]
+            print(f"Room {player_room_id} deleted because creator left")
+        else:
+            # Notify remaining players
+            socketio.emit("room_update", {
+                'roomName': player_room_id,
+                'players': room_data['players'],
+                'creatorSid': room_data['created_by']
+            }, room=player_room_id)
+            print(f"Sent room_update to remaining players in {player_room_id}")
+
+        # Broadcast updated rooms list to ALL clients
+        rooms_list = get_rooms_list()
+        print(f"Broadcasting rooms_update to all clients: {len(rooms_list)} rooms")
+        socketio.emit("rooms_update", {'rooms': rooms_list})
+        print(f"Rooms after update: {[room['id'] for room in rooms_list]}")
+
+        # Send confirmation to the leaving player
+        emit("left_room", {'success': True, 'roomId': player_room_id}, to=request.sid)
+        return
+
     # Find the game the player is in
     game: Game = next(filter(lambda g: request.sid in g.sids, games.values()), None)
 
@@ -172,6 +428,26 @@ def leave_game():
             del games[game.room]
 
     print(f"Player {request.sid[-4:]} left game {game.room}")
+
+@socketio.on("get_rooms")
+def get_rooms():
+    """Get list of available manual rooms"""
+    rooms_list = get_rooms_list()
+    emit("rooms_list", {'rooms': rooms_list}, sid=request.sid)
+
+def get_rooms_list():
+    """Helper to format rooms list for frontend"""
+    return [
+        {
+            'id': room_id,
+            'name': room_id,
+            'creator': room_data['creator_username'],
+            'playerCount': len(room_data['players']),
+            'maxPlayers': 10,
+            'status': 'waiting'
+        }
+        for room_id, room_data in manual_rooms.items()
+    ]
 
 @socketio.on("disconnect")
 def disconnect(data=None):
