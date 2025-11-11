@@ -96,12 +96,39 @@ def create_room(data=None):
     print(f"create_room called by {request.sid[-4:]} ({username})")
     print(f"Current manual_rooms: {list(manual_rooms.keys())}")
 
-    # Check if user already created a room
+    # Check if user already created a room (by sid or username)
     for room_id, room_data in manual_rooms.items():
         if room_data['created_by'] == request.sid:
             error_msg = "You already have an active room. Leave it before creating a new one."
             print(f"ERROR: User {request.sid[-4:]} tried to create multiple rooms. Existing room: {room_id}")
             emit("error", {'message': error_msg, 'event': 'create_room'}, to=request.sid)
+            return
+        # Check if this username already created a room (reconnection case)
+        if room_data['creator_username'] == username:
+            # User reconnected - update their sid in the room
+            print(f"User {username} reconnected to their room {room_id} - updating sid from {room_data['created_by'][-4:]} to {request.sid[-4:]}")
+            old_sid = room_data['created_by']
+            room_data['created_by'] = request.sid
+            # Update player list too
+            for i, (sid, uname) in enumerate(room_data['players']):
+                if sid == old_sid:
+                    room_data['players'][i] = (request.sid, username)
+                    break
+
+            # Join socket.io room
+            join_room(room=room_id, sid=request.sid)
+
+            # Send you_joined_queue so frontend knows their sid
+            emit("you_joined_queue", {'your_sid': request.sid}, to=request.sid)
+
+            # Notify them they're back in their room
+            emit("room_created", {
+                'roomId': room_id,
+                'roomName': room_id
+            }, sid=request.sid)
+
+            # Update room list
+            socketio.emit("rooms_update", {'rooms': get_rooms_list()})
             return
 
     room_id = get_room_name()
@@ -144,15 +171,33 @@ def join_manual_room(data):
 
     room_data = manual_rooms[room_id]
 
-    # Check if already in room (allow re-join)
-    already_in_room = any(sid == request.sid for sid, _ in room_data['players'])
+    # Check if already in room by sid (exact match)
+    already_in_room_by_sid = any(sid == request.sid for sid, _ in room_data['players'])
 
-    if not already_in_room:
+    # Check if already in room by username (reconnection with new sid)
+    existing_player_by_username = None
+    for i, (sid, uname) in enumerate(room_data['players']):
+        if uname == username and sid != request.sid:
+            existing_player_by_username = i
+            break
+
+    if already_in_room_by_sid:
+        print(f"{username} ({request.sid[-4:]}) already in room {room_id}")
+    elif existing_player_by_username is not None:
+        # User reconnected with new sid - update their sid
+        old_sid = room_data['players'][existing_player_by_username][0]
+        room_data['players'][existing_player_by_username] = (request.sid, username)
+
+        # If this user is the creator, update created_by as well
+        if room_data['created_by'] == old_sid:
+            room_data['created_by'] = request.sid
+            print(f"Creator {username} reconnected to room {room_id} - updated sid from {old_sid[-4:]} to {request.sid[-4:]}")
+        else:
+            print(f"{username} reconnected to room {room_id} - updated sid from {old_sid[-4:]} to {request.sid[-4:]}")
+    else:
         # Add player to room
         room_data['players'].append((request.sid, username))
         print(f"{username} ({request.sid[-4:]}) joined room {room_id}")
-    else:
-        print(f"{username} ({request.sid[-4:]}) re-joining room {room_id}")
 
     # Join socket.io room (idempotent)
     join_room(room=room_id, sid=request.sid)
@@ -169,8 +214,8 @@ def join_manual_room(data):
         'creatorSid': room_data['created_by']
     }, sid=request.sid)
 
-    # Only broadcast if new player (not re-join)
-    if not already_in_room:
+    # Broadcast if new player or reconnection (not just re-join with same sid)
+    if not already_in_room_by_sid:
         # Notify all players in the room
         socketio.emit("room_update", {
             'roomName': room_id,
@@ -178,8 +223,10 @@ def join_manual_room(data):
             'creatorSid': room_data['created_by']
         }, room=room_id)
 
-        # Update rooms list for everyone
-        socketio.emit("rooms_update", {'rooms': get_rooms_list()})
+        # Update rooms list for everyone (reconnections don't change player count but updates are good)
+        if existing_player_by_username is None:
+            # Only update room list if it's a truly new player (not a reconnection)
+            socketio.emit("rooms_update", {'rooms': get_rooms_list()})
 
 @socketio.on("remove_player_from_room")
 def remove_player_from_room(data):
@@ -454,6 +501,18 @@ def disconnect(data=None):
     global queue
     users.discard(request.sid)  # Use discard to avoid KeyError if not present
     queue = [item for item in queue if item[0] != request.sid]
+
+    print(f"User {request.sid[-4:]} disconnected")
+
+    # Check if user is in a manual room
+    # Note: We don't immediately remove them - they might reconnect (page reload)
+    # The reconnection logic in join_manual_room/create_room handles updating their sid
+    for room_id, room_data in list(manual_rooms.items()):
+        for i, (sid, username) in enumerate(room_data['players']):
+            if sid == request.sid:
+                print(f"User {username} ({request.sid[-4:]}) disconnected from room {room_id} - keeping in room for potential reconnection")
+                # Don't remove them yet - let them reconnect with same username
+                break
 
     # Find player's game and mark them as inactive
     game: Game = next(filter(lambda g: request.sid in g.sids, games.values()), None)
