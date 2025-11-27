@@ -160,7 +160,7 @@ def create_room(data=None):
 
 @socketio.on("join_manual_room")
 def join_manual_room(data):
-    """Join a specific manual room"""
+    """Join a specific manual room or spectate if game has started"""
     room_id = data.get('roomId')
     username = data.get('username', request.sid[-4:])
 
@@ -170,19 +170,32 @@ def join_manual_room(data):
         return
 
     room_data = manual_rooms[room_id]
+    game_started = room_data.get('game_started', False)
 
-    # Check if already in room by sid (exact match)
+    # Initialize spectators list if not present
+    if 'spectators' not in room_data:
+        room_data['spectators'] = []
+
+    # Check if already in room by sid (exact match) - as player or spectator
     already_in_room_by_sid = any(sid == request.sid for sid, _ in room_data['players'])
+    already_spectating_by_sid = any(sid == request.sid for sid, _ in room_data['spectators'])
 
     # Check if already in room by username (reconnection with new sid)
     existing_player_by_username = None
+    existing_spectator_by_username = None
     for i, (sid, uname) in enumerate(room_data['players']):
         if uname == username and sid != request.sid:
             existing_player_by_username = i
             break
+    for i, (sid, uname) in enumerate(room_data['spectators']):
+        if uname == username and sid != request.sid:
+            existing_spectator_by_username = i
+            break
 
     if already_in_room_by_sid:
-        print(f"{username} ({request.sid[-4:]}) already in room {room_id}")
+        print(f"{username} ({request.sid[-4:]}) already in room {room_id} as player")
+    elif already_spectating_by_sid:
+        print(f"{username} ({request.sid[-4:]}) already in room {room_id} as spectator")
     elif existing_player_by_username is not None:
         # User reconnected with new sid - update their sid
         old_sid = room_data['players'][existing_player_by_username][0]
@@ -194,8 +207,17 @@ def join_manual_room(data):
             print(f"Creator {username} reconnected to room {room_id} - updated sid from {old_sid[-4:]} to {request.sid[-4:]}")
         else:
             print(f"{username} reconnected to room {room_id} - updated sid from {old_sid[-4:]} to {request.sid[-4:]}")
+    elif existing_spectator_by_username is not None:
+        # Spectator reconnected with new sid
+        old_sid = room_data['spectators'][existing_spectator_by_username][0]
+        room_data['spectators'][existing_spectator_by_username] = (request.sid, username)
+        print(f"Spectator {username} reconnected to room {room_id} - updated sid from {old_sid[-4:]} to {request.sid[-4:]}")
+    elif game_started:
+        # Game has started, join as spectator
+        room_data['spectators'].append((request.sid, username))
+        print(f"{username} ({request.sid[-4:]}) joined room {room_id} as spectator (game in progress)")
     else:
-        # Add player to room
+        # Add player to room (game hasn't started yet)
         room_data['players'].append((request.sid, username))
         print(f"{username} ({request.sid[-4:]}) joined room {room_id}")
 
@@ -205,27 +227,52 @@ def join_manual_room(data):
     # Send you_joined_queue so frontend knows their sid for game logic
     emit("you_joined_queue", {'your_sid': request.sid}, to=request.sid)
 
-    # Notify the player who joined
-    emit("joined_room", {
+    # Determine if this user is a spectator
+    is_spectator = game_started and (
+        already_spectating_by_sid or
+        existing_spectator_by_username is not None or
+        (not already_in_room_by_sid and existing_player_by_username is None)
+    )
+
+    # Notify the player/spectator who joined
+    joined_room_data = {
         'roomId': room_id,
         'roomName': room_id,
         'players': room_data['players'],
         'isCreator': room_data['created_by'] == request.sid,
-        'creatorSid': room_data['created_by']
-    }, sid=request.sid)
+        'creatorSid': room_data['created_by'],
+        'isSpectator': is_spectator,
+        'spectators': room_data.get('spectators', []),
+        'gameStarted': game_started
+    }
 
-    # Broadcast if new player or reconnection (not just re-join with same sid)
-    if not already_in_room_by_sid:
+    # If game has started and user is spectating, send current game state
+    if game_started and is_spectator and room_id in games:
+        game = games[room_id]
+        joined_room_data['currentGameState'] = {
+            'player_turn_index': game.player_turn_index,
+            'last_bet': game.last_bet,
+            'players': [{'sid': p.sid, 'username': p.username, 'hand_count': p.hand_count, 'last_bet': p.last_bet, 'is_active': p.is_active} for p in game.players],
+            'deal_in_progress': game.deal_in_progess,
+            'game_finished': game.game_finished
+        }
+
+    emit("joined_room", joined_room_data, sid=request.sid)
+
+    # Broadcast if new player/spectator or reconnection (not just re-join with same sid)
+    if not already_in_room_by_sid and not already_spectating_by_sid:
         # Notify all players in the room
         socketio.emit("room_update", {
             'roomName': room_id,
             'players': room_data['players'],
-            'creatorSid': room_data['created_by']
+            'creatorSid': room_data['created_by'],
+            'spectators': room_data.get('spectators', []),
+            'gameStarted': game_started
         }, room=room_id)
 
         # Update rooms list for everyone (reconnections don't change player count but updates are good)
-        if existing_player_by_username is None:
-            # Only update room list if it's a truly new player (not a reconnection)
+        if existing_player_by_username is None and existing_spectator_by_username is None:
+            # Only update room list if it's a truly new player/spectator (not a reconnection)
             socketio.emit("rooms_update", {'rooms': get_rooms_list()})
 
 @socketio.on("remove_player_from_room")
@@ -363,30 +410,35 @@ def start_manual_room_game(data):
     game.deal()
     games[room_id] = game
 
-    # Remove room from manual_rooms (game is now active)
-    del manual_rooms[room_id]
+    # Mark room as having game in progress and add spectators list
+    room_data['game_started'] = True
+    room_data['spectators'] = []  # List of (sid, username) for spectators
 
-    # Update rooms list for everyone
+    # Update rooms list for everyone (room should now show as 'in_progress')
     socketio.emit("rooms_update", {'rooms': get_rooms_list()})
 
 @socketio.on("bet")
 def bet(data):
     print("bet", request.sid[-4:], data)
-    
+
     game: Game = next(filter(lambda g: request.sid in g.sids, games.values()), None)
-    
+
     if game is None:
         emit("message", {'text': "youre not in game. join a game to make a bet"}, sid=request.sid)
         return
-    
+
     assert "bet" in data.keys()
-    
+
     game.make_move(request.sid, data["bet"])
-                
+
     if game.game_finished:
         close_room(game.room)
         del games[game.room]
-    
+        # Also remove from manual_rooms if it exists (for spectator mode)
+        if game.room in manual_rooms:
+            del manual_rooms[game.room]
+            socketio.emit("rooms_update", {'rooms': get_rooms_list()})
+
     if not game.deal_in_progess:
         game.deal()
 
@@ -394,16 +446,49 @@ def bet(data):
 def leave_game():
     print("leave_game", request.sid[-4:])
 
-    # First check if player is in a manual room (not yet started game)
+    # First check if player is in a manual room (as player or spectator)
     player_room_id = None
+    is_spectator = False
     for room_id, room_data in manual_rooms.items():
+        # Check if in spectators list
+        if 'spectators' in room_data and any(sid == request.sid for sid, _ in room_data.get('spectators', [])):
+            player_room_id = room_id
+            is_spectator = True
+            break
+        # Check if in players list
         if any(sid == request.sid for sid, _ in room_data['players']):
             player_room_id = room_id
             break
 
     if player_room_id:
-        # Player is in a manual room
+        # Player or spectator is in a manual room
         room_data = manual_rooms[player_room_id]
+
+        if is_spectator:
+            # Handle spectator leaving
+            spectator_username = next((username for sid, username in room_data.get('spectators', []) if sid == request.sid), 'Unknown')
+            print(f"Spectator {request.sid[-4:]} ({spectator_username}) leaving room {player_room_id}")
+
+            # Remove spectator from room
+            room_data['spectators'] = [s for s in room_data.get('spectators', []) if s[0] != request.sid]
+
+            # Leave socket.io room
+            leave_room(room=player_room_id, sid=request.sid)
+
+            # Broadcast updated spectator count
+            socketio.emit("room_update", {
+                'roomName': player_room_id,
+                'players': room_data['players'],
+                'creatorSid': room_data['created_by'],
+                'spectators': room_data.get('spectators', []),
+                'gameStarted': room_data.get('game_started', False)
+            }, room=player_room_id)
+
+            socketio.emit("rooms_update", {'rooms': get_rooms_list()})
+            emit("left_room", {'success': True, 'roomId': player_room_id}, to=request.sid)
+            return
+
+        # Player is in the room (not a spectator)
         is_creator = room_data['created_by'] == request.sid
         player_username = next((username for sid, username in room_data['players'] if sid == request.sid), 'Unknown')
 
@@ -531,7 +616,8 @@ def get_rooms_list():
             'creator': room_data['creator_username'],
             'playerCount': len(room_data['players']),
             'maxPlayers': 10,
-            'status': 'waiting'
+            'status': 'in_progress' if room_data.get('game_started', False) else 'waiting',
+            'spectatorCount': len(room_data.get('spectators', []))
         }
         for room_id, room_data in manual_rooms.items()
     ]

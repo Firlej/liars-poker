@@ -101,7 +101,7 @@ class Game:
     def _process_bot_turn(self):
         """Process bot turns automatically until it's a human's turn."""
         # Add delay to make bot moves visible
-        time.sleep(2.0)
+        gevent.sleep(1.5)
 
         while self.deal_in_progess and not self.game_finished:
             current_player = self.players[self.player_turn_index]
@@ -123,7 +123,7 @@ class Game:
 
             # Delay between bot moves
             if self.deal_in_progess and not self.game_finished:
-                time.sleep(2.0)
+                gevent.sleep(1.5)
 
     def deal(self):
 
@@ -173,6 +173,10 @@ class Game:
             self.game_finished = True
             return
 
+        self.last_bet = None
+        self.last_bettor_index = None  # Reset last bettor for new deal
+        self.deal_in_progess = True  # Set this BEFORE emitting events
+
         for p in self.players:
             if not p.is_active or p.is_bot:
                 continue
@@ -191,11 +195,6 @@ class Game:
                     'your_hand': p.hand.cards
                 }
             }, to = p.sid)
-
-        self.last_bet = None
-        self.last_bettor_index = None  # Reset last bettor for new deal
-
-        self.deal_in_progess = True
 
         # Process bot turn if current player is a bot
         self._process_bot_turn()
@@ -232,6 +231,14 @@ class Game:
                 
                 return
         
+            # Collect all players' hands to show after check
+            player_hands = {}
+            for p in self.players:
+                if p.hand is not None:
+                    player_hands[p.sid] = p.hand.cards
+                else:
+                    player_hands[p.sid] = []
+
             self.emit('game_update', {
                 'text': f"{current_player.username} checks!",
                 'json': {
@@ -241,9 +248,13 @@ class Game:
                     'player_turn_index': self.player_turn_index,
                     'players': [{'sid': p.sid, 'username': p.username, 'hand_count': p.hand_count, 'last_bet': p.last_bet, 'is_active': p.is_active} for p in self.players],
                     'deal_in_progress': self.deal_in_progess,
-                    'game_finished': self.game_finished
+                    'game_finished': self.game_finished,
+                    'player_hands': player_hands
                 }
             })
+
+            # Add delay to allow frontend to process check event
+            gevent.sleep(0.5)
 
             # Determine loser: checker or last bettor
             loser_player_index = self.player_turn_index
@@ -306,6 +317,9 @@ class Game:
             }
         })
 
+        # Add delay to allow frontend to process bet event
+        gevent.sleep(0.5)
+
         # Process bot turn if next player is a bot
         self._process_bot_turn()
 
@@ -330,6 +344,9 @@ class Game:
                 'text': f"{loser.username} lost the deal!"
             })
 
+            # Add delay to allow frontend to process lost event
+            gevent.sleep(0.5)
+
             player_cards = [[p.sid, p.hand.cards] for p in self.players]
 
             if loser.hand_count > MAX_CARDS:
@@ -337,6 +354,9 @@ class Game:
                 self.emit('game_update', {
                     'text': f"{loser.username} is out!"
                 })
+
+                # Add delay to allow frontend to process elimination event
+                gevent.sleep(0.5)
 
                 del self.players[loser_player_index]
 
@@ -346,8 +366,16 @@ class Game:
             if len(active_players) == 1:
                 winner = active_players[0]
                 self.emit('game_update', {
-                    'text': f"{winner.username} won!"
+                    'text': f"{winner.username} won!",
+                    'json': {
+                        'action': 'game_won',
+                        'winner_sid': winner.sid,
+                        'winner_username': winner.username,
+                        'players': [{'sid': p.sid, 'username': p.username, 'hand_count': p.hand_count, 'last_bet': p.last_bet, 'is_active': p.is_active} for p in self.players]
+                    }
                 })
+                # Add delay to allow frontend to process won event
+                gevent.sleep(0.5)
             else:
                 self.emit('game_update', {
                     'text': "Game ended - no active players remaining."
