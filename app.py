@@ -518,6 +518,13 @@ def leave_game():
 
         # If room creator left, delete the room
         if is_creator:
+            # Also clean up any active game associated with this room
+            if player_room_id in games:
+                game = games[player_room_id]
+                print(f"Cleaning up active game in room {player_room_id}")
+                close_room(game.room)
+                del games[player_room_id]
+
             del manual_rooms[player_room_id]
             print(f"Room {player_room_id} deleted because creator left")
         else:
