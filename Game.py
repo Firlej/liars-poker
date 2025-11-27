@@ -3,11 +3,13 @@ from Deck import Deck
 from collections import namedtuple
 from flask_socketio import emit
 import random
+import time
+import gevent
 
 from Solver import Solver, combinations# Player = namedtuple("Player", ["name", "hand", "solver"])
 
 class Player:
-    def __init__(self, sid, hand_count, username, hand=None, solver=None):
+    def __init__(self, sid, hand_count, username, hand=None, solver=None, is_bot=False):
         self.sid = sid
         self.hand_count = hand_count
         self.hand = hand
@@ -15,31 +17,40 @@ class Player:
         self.last_bet = None
         self.username = username
         self.is_active = True  # Track if player is still connected/active
+        self.is_bot = is_bot  # Track if player is a bot
 
     def __repr__(self) -> str:
-        return f"Player(sid={self.sid}, hand_count={self.hand_count}, last_bet={self.last_bet}, is_active={self.is_active}, hand={self.hand}, solver={self.solver})"
+        return f"Player(sid={self.sid}, hand_count={self.hand_count}, last_bet={self.last_bet}, is_active={self.is_active}, is_bot={self.is_bot}, hand={self.hand}, solver={self.solver})"
     
 
 class Game:
-    
-    def __init__(self, sids: List[str], room: str, usernames: List[str]):
-        
+
+    def __init__(self, sids: List[str], room: str, usernames: List[str], bot_flags: List[bool] = None):
+
         print("usernames", usernames)
         self.room = room
         self.sids = sids
         self.usernames = usernames
-            
+
+        # Handle bot flags - default to all human players if not specified
+        if bot_flags is None:
+            bot_flags = [False] * len(sids)
+
         self.players: List[Player] = [
             Player(
                 sid = sid,
                 hand_count = 1,
                 hand = None,
                 solver = None,
-                username = usernames[i]
+                username = usernames[i],
+                is_bot = bot_flags[i]
             )
             for i, sid in enumerate(sids)
         ]
-        
+
+        # Store bot instances
+        self.bots = {}  # Will be populated in deal() when bots have hands
+
         self.player_turn_index = 0
         self.last_bettor_index = None  # Track who made the last bet
 
@@ -79,13 +90,40 @@ class Game:
         return None
         
     def emit(self, event, data = {}, to = None):
-        
+
         if to is None:
             to = self.room
-        
+
         print(f"Emmiting {data} to {to}")
-        
+
         emit(event, data, to = to)
+
+    def _process_bot_turn(self):
+        """Process bot turns automatically until it's a human's turn."""
+        # Add delay to make bot moves visible
+        time.sleep(2.0)
+
+        while self.deal_in_progess and not self.game_finished:
+            current_player = self.players[self.player_turn_index]
+
+            # Check if current player is a bot
+            if not current_player.is_bot or not current_player.is_active:
+                break
+
+            # Get bot instance
+            bot = self.bots.get(current_player.sid)
+            if bot is None:
+                break
+
+            # Let bot make decision
+            decision = bot.make_decision()
+
+            # Execute bot's move
+            self.make_move(current_player.sid, decision)
+
+            # Delay between bot moves
+            if self.deal_in_progess and not self.game_finished:
+                time.sleep(2.0)
 
     def deal(self):
 
@@ -121,8 +159,13 @@ class Game:
         player_hand_counts = { p.sid: p.hand_count for p in self.players}
 
         for player, hand in zip(active_players, hands):
-            player.hand = hand
+            player.hand = Deck(hand)  # Convert list to Deck object for .combinations attribute
             player.solver = Solver(hand, n)
+
+            # Initialize bot if this is a bot player
+            if player.is_bot:
+                from BotPlayer import BotPlayer
+                self.bots[player.sid] = BotPlayer(player, self)
 
         # Ensure player_turn_index points to an active player
         self.player_turn_index = self.get_next_active_player_index(self.player_turn_index)
@@ -131,12 +174,12 @@ class Game:
             return
 
         for p in self.players:
-            if not p.is_active:
+            if not p.is_active or p.is_bot:
                 continue
 
             self.emit('game_update', {
-                'text': f"New deal! Your hand: {p.hand}",
-                'your_hand': p.hand,
+                'text': f"New deal! Your hand: {p.hand.cards}",
+                'your_hand': p.hand.cards,
                 'player_hand_counts': player_hand_counts,
                 'json': {
                     'action': 'new_deal',
@@ -145,7 +188,7 @@ class Game:
                     'players': [{'sid': p.sid, 'username': p.username, 'hand_count': p.hand_count, 'last_bet': p.last_bet, 'is_active': p.is_active} for p in self.players],
                     'deal_in_progress': self.deal_in_progess,
                     'game_finished': self.game_finished,
-                    'your_hand': p.hand
+                    'your_hand': p.hand.cards
                 }
             }, to = p.sid)
 
@@ -153,6 +196,9 @@ class Game:
         self.last_bettor_index = None  # Reset last bettor for new deal
 
         self.deal_in_progess = True
+
+        # Process bot turn if current player is a bot
+        self._process_bot_turn()
 
         return
 
@@ -259,7 +305,10 @@ class Game:
                 'game_finished': self.game_finished
             }
         })
-        
+
+        # Process bot turn if next player is a bot
+        self._process_bot_turn()
+
         return
 
     def finish_deal(self, loser_player_index = None):
@@ -281,7 +330,7 @@ class Game:
                 'text': f"{loser.username} lost the deal!"
             })
 
-            player_cards = [[p.sid, p.hand] for p in self.players]
+            player_cards = [[p.sid, p.hand.cards] for p in self.players]
 
             if loser.hand_count > MAX_CARDS:
 
@@ -320,6 +369,9 @@ class Game:
             return
 
         self.deal_in_progess = False
+
+        # Note: We don't call _process_bot_turn here because finish_deal ends the current deal
+        # The next deal will be started by the user/system and will handle bot turns
 
         return
 

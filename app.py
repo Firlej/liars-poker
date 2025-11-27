@@ -290,6 +290,43 @@ def remove_player_from_room(data):
     # Broadcast updated room list to all clients
     socketio.emit("rooms_update", {'rooms': get_rooms_list()})
 
+@socketio.on("add_bot_to_room")
+def add_bot_to_room(data):
+    """Add a bot player to a manual room"""
+    room_id = data.get('roomId')
+
+    # Validate room exists
+    if not room_id or room_id not in manual_rooms:
+        emit("error", {'message': "Room does not exist"}, sid=request.sid)
+        return
+
+    room_data = manual_rooms[room_id]
+
+    # Only creator can add bots
+    if room_data['created_by'] != request.sid:
+        emit("error", {'message': "Only room creator can add bots"}, sid=request.sid)
+        return
+
+    # Generate unique bot ID
+    import uuid
+    bot_sid = f"bot_{uuid.uuid4().hex[:8]}"
+    bot_count = sum(1 for _, username in room_data['players'] if username.startswith("Bot "))
+    bot_username = f"Bot {bot_count + 1}"
+
+    # Add bot to room
+    room_data['players'].append((bot_sid, bot_username))
+    print(f"Bot {bot_username} ({bot_sid[-8:]}) added to room {room_id}")
+
+    # Notify all players in the room
+    socketio.emit("room_update", {
+        'roomName': room_id,
+        'players': room_data['players'],
+        'creatorSid': room_data['created_by']
+    }, room=room_id)
+
+    # Update rooms list for everyone
+    socketio.emit("rooms_update", {'rooms': get_rooms_list()})
+
 @socketio.on("start_manual_room_game")
 def start_manual_room_game(data):
     """Start game from manual room"""
@@ -316,10 +353,13 @@ def start_manual_room_game(data):
     sids = [sid for sid, _ in room_data['players']]
     usernames = [username for _, username in room_data['players']]
 
-    print(f"Starting game in room {room_id} with {len(sids)} players")
+    # Determine which players are bots
+    bot_flags = [sid.startswith('bot_') for sid in sids]
+
+    print(f"Starting game in room {room_id} with {len(sids)} players ({sum(bot_flags)} bots)")
 
     # Create and start the game
-    game = Game(sids=sids, room=room_id, usernames=usernames)
+    game = Game(sids=sids, room=room_id, usernames=usernames, bot_flags=bot_flags)
     game.deal()
     games[room_id] = game
 
@@ -573,4 +613,4 @@ def disconnect(data=None):
 if __name__ == "__main__":
     import os
     port = int(os.environ.get("PORT", 4000))
-    # socketio.run(app = app, host='0.0.0.0', port=port, debug=False)
+    socketio.run(app = app, host='0.0.0.0', port=port, debug=False)
