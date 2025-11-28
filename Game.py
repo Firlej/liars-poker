@@ -381,7 +381,8 @@ class Game:
             # Add delay to allow frontend to process lost event
             gevent.sleep(0.5)
 
-            player_cards = [[p.sid, p.hand.cards] for p in self.players]
+            # Note: player_cards variable is not used, removing to avoid AttributeError
+            # player_cards = [[p.sid, p.hand.cards] for p in self.players]
 
             if loser.hand_count > MAX_CARDS:
 
