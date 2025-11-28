@@ -459,8 +459,10 @@ class Game:
 
         self.deal_in_progress = False
 
-        # Note: We don't call _process_bot_turn here because finish_deal ends the current deal
-        # The next deal will be started by the user/system and will handle bot turns
+        # Start the next deal immediately
+        # This is critical - if the next player is a bot, we need to deal now
+        # Otherwise the game will hang waiting for a human move that triggers deal()
+        self.deal()
 
         return
 

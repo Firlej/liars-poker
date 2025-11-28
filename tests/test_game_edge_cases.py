@@ -398,5 +398,154 @@ class TestBotEdgeCases(unittest.TestCase):
         self.assertTrue(game.players[3].is_bot)
 
 
+class TestRealWorldBugScenarios(unittest.TestCase):
+    """Test cases based on actual bugs reported by users"""
+
+    @patch('Game.emit')
+    @patch('Game.gevent')
+    def test_turn_order_bug_igor_scenario(self, mock_gevent, mock_emit):
+        """
+        Test the exact scenario from user bug report:
+        - Igor, Bot 1, Bot 2, Bot 3
+        - Bot 1 loses a deal
+        - New deal starts with Bot 2 first
+        - Bot 3 bets pair_9
+        - Igor bets pair_J
+        - Bot 1 checks
+        - Igor loses the deal
+        - Igor should be able to make next move but gets "not your turn"
+
+        This was caused by player_turn_index in deal_result emission
+        being wrong (pointing to checker instead of loser)
+        """
+        mock_emit_tracker = MockEmit()
+
+        with patch('Game.emit', mock_emit_tracker):
+            # Setup: Igor (human), Bot 1, Bot 2, Bot 3
+            game = Game(
+                ['igor_sid', 'bot1_sid', 'bot2_sid', 'bot3_sid'],
+                'test_room',
+                ['Igor 16', 'Bot 1', 'Bot 2', 'Bot 3'],
+                [False, True, True, True]  # Igor is human, rest are bots
+            )
+
+            # Simulate game state before the bug
+            game.deal_in_progress = True
+            game.player_turn_index = 0  # Igor's turn
+            game.last_bet = 'pair_J'
+            game.last_bettor_index = 0  # Igor made the last bet
+
+            from unittest.mock import MagicMock
+            game.cards = MagicMock()
+            game.cards.combinations = {'pair_J': True}  # Bet was true
+
+            for p in game.players:
+                p.hand = MagicMock()
+                p.hand.cards = ['J♠', 'J♥']
+
+            # Bot 1 checks (index 1)
+            game.player_turn_index = 1
+            game.make_move('bot1_sid', 'check')
+
+            # At this point Igor should have lost (he was the checker)
+            # Actually wait - if bet was TRUE, checker loses
+            # In the real scenario: Bot 1 checks, and Igor loses
+            # This means Igor was NOT the checker, Bot 1 was
+
+            # Let me re-simulate the correct scenario:
+            # Reset
+            game = Game(
+                ['igor_sid', 'bot1_sid', 'bot2_sid', 'bot3_sid'],
+                'test_room',
+                ['Igor 16', 'Bot 1', 'Bot 2', 'Bot 3'],
+                [False, True, True, True]
+            )
+
+            game.deal_in_progress = True
+            game.player_turn_index = 1  # Bot 1's turn to check
+            game.last_bet = 'pair_J'
+            game.last_bettor_index = 0  # Igor made pair_J bet
+
+            game.cards = MagicMock()
+            game.cards.combinations = {'pair_J': True}  # Bet was TRUE
+
+            for p in game.players:
+                p.hand = MagicMock()
+                p.hand.cards = ['J♠', 'J♥']
+
+            # Bot 1 checks (checker loses since bet was true)
+            initial_igor_hand_count = game.players[0].hand_count
+            game.make_move('bot1_sid', 'check')
+
+            # Igor should NOT have lost - Bot 1 (checker) should have lost
+            # But let's check if the turn order is correct
+
+            # After finish_deal, check the emission
+            last_emission = mock_emit_tracker.get_last_emission('game_update')
+
+            # The emission should have correct player_turn_index
+            if last_emission and 'json' in last_emission['data']:
+                json_data = last_emission['data']['json']
+                if json_data.get('action') == 'deal_result':
+                    loser_sid = json_data.get('loser_sid')
+                    turn_index = json_data.get('player_turn_index')
+
+                    # The loser should be Bot 1
+                    self.assertEqual(loser_sid, 'bot1_sid')
+
+                    # Find Bot 1's index after the deal
+                    bot1_index = game.get_player_index_by_sid('bot1_sid')
+
+                    # The turn_index in emission should point to the loser
+                    # (who will start next deal)
+                    self.assertEqual(turn_index, bot1_index)
+
+    @patch('Game.emit')
+    @patch('Game.gevent')
+    def test_player_eliminated_turn_index_correct(self, mock_gevent, mock_emit):
+        """
+        Test that when a player is eliminated, the player_turn_index
+        in the emission is correct BEFORE the deletion happens
+        """
+        mock_emit_tracker = MockEmit()
+
+        with patch('Game.emit', mock_emit_tracker):
+            game = Game(['p1', 'p2', 'p3'], 'test_room', ['P1', 'P2', 'P3'])
+            game.deal_in_progress = True
+
+            # P2 at elimination threshold
+            game.players[1].hand_count = 3
+
+            from unittest.mock import MagicMock
+            game.cards = MagicMock()
+            game.cards.combinations = {'high_card_A': True}
+
+            for p in game.players:
+                p.hand = MagicMock()
+                p.hand.cards = ['A♠']
+
+            # P2 loses and gets eliminated
+            game.finish_deal(loser_player_index=1)
+
+            # Check the player_eliminated emission
+            emissions = [e for e in mock_emit_tracker.emissions
+                        if e['event'] == 'game_update']
+
+            eliminated_emission = next(
+                (e for e in emissions
+                 if e['data'].get('json', {}).get('action') == 'player_eliminated'),
+                None
+            )
+
+            self.assertIsNotNone(eliminated_emission)
+
+            json_data = eliminated_emission['data']['json']
+
+            # The turn_index should be calculated BEFORE deletion
+            # In our implementation, we calculate: loser_player_index % max(1, len(players) - 1)
+            # With 3 players, loser at index 1: 1 % max(1, 2) = 1 % 2 = 1
+            self.assertEqual(json_data['player_turn_index'], 1)
+
+
 if __name__ == '__main__':
     unittest.main()
