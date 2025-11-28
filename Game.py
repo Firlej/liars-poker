@@ -9,7 +9,7 @@ import gevent
 from Solver import Solver, combinations# Player = namedtuple("Player", ["name", "hand", "solver"])
 
 class Player:
-    def __init__(self, sid, hand_count, username, hand=None, solver=None, is_bot=False):
+    def __init__(self, sid, hand_count, username, hand=None, solver=None, is_bot=False, was_human=False):
         self.sid = sid
         self.hand_count = hand_count
         self.hand = hand
@@ -18,6 +18,7 @@ class Player:
         self.username = username
         self.is_active = True  # Track if player is still connected/active
         self.is_bot = is_bot  # Track if player is a bot
+        self.was_human = was_human  # Track if converted from human to bot
 
     def __repr__(self) -> str:
         return f"Player(sid={self.sid}, hand_count={self.hand_count}, last_bet={self.last_bet}, is_active={self.is_active}, is_bot={self.is_bot}, hand={self.hand}, solver={self.solver})"
@@ -25,12 +26,18 @@ class Player:
 
 class Game:
 
-    def __init__(self, sids: List[str], room: str, usernames: List[str], bot_flags: List[bool] = None):
+    def __init__(self, sids: List[str], room: str, usernames: List[str], bot_flags: List[bool] = None, bet_timer_duration: int = 30, socketio=None):
 
         print("usernames", usernames)
         self.room = room
         self.sids = sids
         self.usernames = usernames
+        self.socketio = socketio  # Store socketio instance for background tasks
+
+        # Timer configuration and state
+        self.bet_timer_duration = bet_timer_duration  # seconds, 0 = disabled
+        self.active_timer_greenlet = None  # Reference to running timer greenlet
+        self.timer_target_player_sid = None  # Which player the timer is for
 
         # Handle bot flags - default to all human players if not specified
         if bot_flags is None:
@@ -82,10 +89,26 @@ class Game:
         return None
 
     def mark_player_inactive(self, sid: str):
-        """Mark a player as inactive (disconnected) but keep them in the game."""
+        """Mark a player as inactive (disconnected) and convert to permanent bot."""
         player = next((p for p in self.players if p.sid == sid), None)
         if player:
             player.is_active = False
+
+            # Convert to permanent bot if they were human and game is in progress
+            if not player.is_bot and self.deal_in_progess:
+                self._convert_player_to_bot(sid, temporary=False)
+
+                # Notify all players about bot takeover
+                self.emit('game_update', {
+                    'text': f"{player.username} disconnected. Bot taking over.",
+                    'json': {
+                        'action': 'player_converted_to_bot',
+                        'player_sid': sid,
+                        'player_username': player.username,
+                        'permanent': True
+                    }
+                })
+
             return player
         return None
         
@@ -96,7 +119,12 @@ class Game:
 
         print(f"Emmiting {data} to {to}")
 
-        emit(event, data, to = to)
+        # Use socketio.emit() if available (works in all contexts)
+        # Otherwise fall back to request-scoped emit() (only works in request context)
+        if self.socketio:
+            self.socketio.emit(event, data, room=to)
+        else:
+            emit(event, data, to = to)
 
     def _process_bot_turn(self):
         """Process bot turns automatically until it's a human's turn."""
@@ -106,8 +134,8 @@ class Game:
         while self.deal_in_progess and not self.game_finished:
             current_player = self.players[self.player_turn_index]
 
-            # Check if current player is a bot
-            if not current_player.is_bot or not current_player.is_active:
+            # Check if current player is a bot (bots can be active or inactive)
+            if not current_player.is_bot:
                 break
 
             # Get bot instance
@@ -124,6 +152,156 @@ class Game:
             # Delay between bot moves
             if self.deal_in_progess and not self.game_finished:
                 gevent.sleep(1.5)
+
+    def _start_bet_timer(self, player_sid: str):
+        """
+        Start a countdown timer for the current player's turn.
+        If timer expires, convert player to bot and make automatic move.
+        """
+        # Check if timer is enabled
+        if self.bet_timer_duration <= 0:
+            return
+
+        # Don't start timer for bot players or inactive players
+        player = next((p for p in self.players if p.sid == player_sid), None)
+        if not player or player.is_bot or not player.is_active:
+            return
+
+        # Cancel any existing timer
+        self._cancel_bet_timer()
+
+        # Store timer target
+        self.timer_target_player_sid = player_sid
+
+        # Calculate expiry time
+        expires_at = time.time() + self.bet_timer_duration
+
+        # Emit timer_started event for frontend countdown
+        self.emit('game_update', {
+            'json': {
+                'action': 'timer_started',
+                'player_sid': player_sid,
+                'duration_seconds': self.bet_timer_duration,
+                'expires_at': expires_at
+            }
+        })
+
+        # Spawn timer greenlet
+        self.active_timer_greenlet = gevent.spawn_later(
+            self.bet_timer_duration, self._bet_timer_expired, player_sid
+        )
+
+    def _bet_timer_expired(self, player_sid: str):
+        """
+        Called when bet timer expires. Convert player to temporary bot and make move.
+        """
+        try:
+            # Verify this is still the correct player's turn
+            current_player = self.players[self.player_turn_index]
+            if current_player.sid != player_sid:
+                return  # Turn already changed
+
+            # Verify player is still active and not already a bot
+            if not current_player.is_active or current_player.is_bot:
+                return
+
+            # Notify all players that timeout occurred
+            self.emit('game_update', {
+                'text': f"{current_player.username} timed out. Bot taking over for this turn.",
+                'json': {
+                    'action': 'player_timeout',
+                    'player_sid': player_sid,
+                    'player_username': current_player.username
+                }
+            })
+
+            gevent.sleep(1.0)  # Let players see the timeout message
+
+            # Convert to temporary bot for this move only
+            self._convert_player_to_bot(player_sid, temporary=True)
+
+            # Make bot decision
+            bot = self.bots.get(player_sid)
+            if bot:
+                decision = bot.make_decision()
+                self.make_move(player_sid, decision)
+
+                # If deal finished, automatically start next deal (same logic as in app.py bet handler)
+                if not self.deal_in_progess and not self.game_finished:
+                    self.deal()
+
+        except gevent.GreenletExit:
+            # Timer was cancelled because player made a move
+            pass
+        except Exception as e:
+            print(f"Error in _bet_timer_expired: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _cancel_bet_timer(self):
+        """
+        Cancel the active bet timer if one exists.
+        Called when player makes a move or game state changes.
+        """
+        if self.active_timer_greenlet is not None:
+            try:
+                # Emit cancellation event for frontend
+                if self.timer_target_player_sid:
+                    self.emit('game_update', {
+                        'json': {
+                            'action': 'timer_cancelled',
+                            'player_sid': self.timer_target_player_sid
+                        }
+                    })
+
+                # Don't kill the greenlet if we're currently inside it
+                # (this happens when bot makes a move after timeout)
+                if self.active_timer_greenlet != gevent.getcurrent():
+                    self.active_timer_greenlet.kill()
+            except Exception as e:
+                print(f"Error cancelling timer: {e}")
+            finally:
+                self.active_timer_greenlet = None
+                self.timer_target_player_sid = None
+
+    def _convert_player_to_bot(self, player_sid: str, temporary: bool = False):
+        """
+        Convert a human player to a bot player.
+
+        Args:
+            player_sid: SID of player to convert
+            temporary: If True, bot only acts for one turn (timeout scenario)
+                       If False, permanent bot conversion (disconnect scenario)
+        """
+        player = next((p for p in self.players if p.sid == player_sid), None)
+        if not player or player.is_bot:
+            return
+
+        # Mark as bot and track that this was a human
+        player.is_bot = True
+        player.was_human = True
+
+        # Create bot instance if needed (player must have hand and solver)
+        if player_sid not in self.bots and player.hand and player.solver:
+            from BotPlayer import BotPlayer
+            self.bots[player_sid] = BotPlayer(player, self)
+
+        print(f"Converted {player.username} to {'temporary' if temporary else 'permanent'} bot")
+
+    def _restore_player_from_bot(self, player_sid: str):
+        """
+        Restore a temporarily converted bot back to human player.
+        Only works if player.was_human is True (temporary conversion).
+        """
+        player = next((p for p in self.players if p.sid == player_sid), None)
+        if not player or not player.was_human:
+            return
+
+        # Restore to human player
+        player.is_bot = False
+        # Keep was_human flag in case they timeout again
+
+        print(f"Restored {player.username} from temporary bot to human")
 
     def deal(self):
 
@@ -196,14 +374,21 @@ class Game:
                 }
             }, to = p.sid)
 
+        # Start timer for first player
+        current_player = self.players[self.player_turn_index]
+        self._start_bet_timer(current_player.sid)
+
         # Process bot turn if current player is a bot
         self._process_bot_turn()
 
         return
 
     def make_move(self, sid: str, bet: str):
+        # Cancel timer immediately to prevent race conditions
+        self._cancel_bet_timer()
 
         current_player = self.players[self.player_turn_index]
+        was_temporary_bot = current_player.is_bot and current_player.was_human
 
         # Check if current player is still active
         if not current_player.is_active:
@@ -215,7 +400,6 @@ class Game:
             current_player = self.players[self.player_turn_index]
 
         if current_player.sid != sid:
-
             self.emit('game_update', {
                 'text': "Not your turn!"
             }, to = sid)
@@ -297,6 +481,10 @@ class Game:
         current_player.last_bet = bet
         self.last_bettor_index = self.player_turn_index  # Track who made this bet
 
+        # Restore temporary bot to human after their turn
+        if was_temporary_bot:
+            self._restore_player_from_bot(current_player.sid)
+
         # Move to next active player
         next_index = self.get_next_active_player_index(self.player_turn_index + 1)
         if next_index is None:
@@ -320,12 +508,23 @@ class Game:
         # Add delay to allow frontend to process bet event
         gevent.sleep(0.5)
 
+        # Start timer for next player BEFORE processing bot turns
+        next_player = self.players[self.player_turn_index]
+        self._start_bet_timer(next_player.sid)
+
         # Process bot turn if next player is a bot
         self._process_bot_turn()
 
         return
 
     def finish_deal(self, loser_player_index = None):
+        # Cancel any active timer when deal finishes
+        self._cancel_bet_timer()
+
+        # Restore all temporary bots back to human for next deal
+        for player in self.players:
+            if player.is_bot and player.was_human:
+                self._restore_player_from_bot(player.sid)
 
         loser = self.players[loser_player_index]
 

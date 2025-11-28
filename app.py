@@ -66,7 +66,7 @@ def start_game():
         join_room(room = room, sid = sid)
         queue = [item for item in queue if item[0] != sid]
 
-    game = Game(sids = sids, room = room, usernames = usernames)
+    game = Game(sids = sids, room = room, usernames = usernames, socketio=socketio)
     game.deal()
 
     games[room] = game
@@ -138,7 +138,9 @@ def create_room(data=None):
     manual_rooms[room_id] = {
         'players': [(request.sid, username)],
         'created_by': request.sid,
-        'creator_username': username
+        'creator_username': username,
+        'bet_timer_duration': 30,  # Default 30 seconds
+        'bet_timer_enabled': True   # Default enabled
     }
 
     # Join creator to socket.io room
@@ -186,6 +188,7 @@ def join_manual_room(data):
     for i, (sid, uname) in enumerate(room_data['players']):
         if uname == username and sid != request.sid:
             existing_player_by_username = i
+            print(f"Found existing player by username: {username} at index {i}, old_sid={sid[-4:]}")
             break
     for i, (sid, uname) in enumerate(room_data['spectators']):
         if uname == username and sid != request.sid:
@@ -207,6 +210,68 @@ def join_manual_room(data):
             print(f"Creator {username} reconnected to room {room_id} - updated sid from {old_sid[-4:]} to {request.sid[-4:]}")
         else:
             print(f"{username} reconnected to room {room_id} - updated sid from {old_sid[-4:]} to {request.sid[-4:]}")
+
+        # Restore player if game in progress
+        if game_started and room_id in games:
+            game = games[room_id]
+            player = next((p for p in game.players if p.sid == old_sid), None)
+
+            if player:
+                # Update player SID in game
+                player.sid = request.sid
+                player.is_active = True
+
+                # Check if they were converted to bot and need restoration
+                if player.is_bot and player.was_human:
+                    # Restore to human control
+                    player.is_bot = False
+                    # Keep was_human=True for tracking
+
+                    # Remove from bots dictionary
+                    if old_sid in game.bots:
+                        del game.bots[old_sid]
+
+                    # Notify room about bot restoration
+                    socketio.emit('game_update', {
+                        'text': f"{username} reconnected and reclaimed control from bot!",
+                        'json': {
+                            'action': 'player_restored_from_bot',
+                            'player_sid': request.sid,
+                            'player_username': username,
+                            'players': [{'sid': p.sid, 'username': p.username, 'hand_count': p.hand_count, 'last_bet': p.last_bet, 'is_active': p.is_active, 'is_bot': p.is_bot} for p in game.players]
+                        }
+                    }, room=room_id)
+
+                    print(f"{username} reconnected and restored from bot")
+                else:
+                    # Just reactivate the inactive player (wasn't converted to bot)
+                    socketio.emit('game_update', {
+                        'text': f"{username} reconnected!",
+                        'json': {
+                            'action': 'player_reconnected',
+                            'player_sid': request.sid,
+                            'player_username': username,
+                            'players': [{'sid': p.sid, 'username': p.username, 'hand_count': p.hand_count, 'last_bet': p.last_bet, 'is_active': p.is_active, 'is_bot': p.is_bot} for p in game.players]
+                        }
+                    }, room=room_id)
+
+                    print(f"{username} reconnected (was inactive)")
+
+                # Send current game state to the reconnected player
+                socketio.emit('game_update', {
+                    'text': f"Welcome back! Current game state:",
+                    'your_hand': player.hand.cards if player.hand else [],
+                    'json': {
+                        'action': 'player_reconnected_state',
+                        'last_bet': game.last_bet,
+                        'player_turn_index': game.player_turn_index,
+                        'players': [{'sid': p.sid, 'username': p.username, 'hand_count': p.hand_count, 'last_bet': p.last_bet, 'is_active': p.is_active, 'is_bot': p.is_bot} for p in game.players],
+                        'deal_in_progress': game.deal_in_progess,
+                        'game_finished': game.game_finished,
+                        'your_hand': player.hand.cards if player.hand else []
+                    }
+                }, room=request.sid)
+
     elif existing_spectator_by_username is not None:
         # Spectator reconnected with new sid
         old_sid = room_data['spectators'][existing_spectator_by_username][0]
@@ -374,6 +439,50 @@ def add_bot_to_room(data):
     # Update rooms list for everyone
     socketio.emit("rooms_update", {'rooms': get_rooms_list()})
 
+@socketio.on("update_timer_settings")
+def update_timer_settings(data):
+    """Update timer settings for a room (creator only, before game starts)."""
+    room_id = data.get('roomId')
+    bet_timer_duration = data.get('bet_timer_duration')
+    bet_timer_enabled = data.get('bet_timer_enabled')
+
+    # Validate room exists
+    if not room_id or room_id not in manual_rooms:
+        emit("error", {'message': "Room does not exist"}, sid=request.sid)
+        return
+
+    room_data = manual_rooms[room_id]
+
+    # Only creator can change settings
+    if room_data['created_by'] != request.sid:
+        emit("error", {'message': "Only room creator can change timer settings"}, sid=request.sid)
+        return
+
+    # Can't change settings after game starts
+    if room_data.get('game_started', False):
+        emit("error", {'message': "Cannot change timer settings after game has started"}, sid=request.sid)
+        return
+
+    # Update settings with validation
+    if bet_timer_enabled is not None:
+        room_data['bet_timer_enabled'] = bet_timer_enabled
+
+    if bet_timer_duration is not None:
+        # Validate: 0 (disabled) or 10-300 seconds
+        if bet_timer_duration == 0 or (10 <= bet_timer_duration <= 300):
+            room_data['bet_timer_duration'] = bet_timer_duration
+        else:
+            emit("error", {'message': "Timer must be 0 (off) or 10-300 seconds"}, sid=request.sid)
+            return
+
+    # Broadcast updated settings to all players in room
+    socketio.emit("timer_settings_updated", {
+        'bet_timer_enabled': room_data['bet_timer_enabled'],
+        'bet_timer_duration': room_data['bet_timer_duration']
+    }, room=room_id)
+
+    print(f"Timer settings updated for {room_id}: enabled={room_data['bet_timer_enabled']}, duration={room_data['bet_timer_duration']}s")
+
 @socketio.on("start_manual_room_game")
 def start_manual_room_game(data):
     """Start game from manual room"""
@@ -403,10 +512,15 @@ def start_manual_room_game(data):
     # Determine which players are bots
     bot_flags = [sid.startswith('bot_') for sid in sids]
 
-    print(f"Starting game in room {room_id} with {len(sids)} players ({sum(bot_flags)} bots)")
+    # Get timer settings from room config
+    bet_timer_duration = 0  # Default disabled
+    if room_data.get('bet_timer_enabled', True):
+        bet_timer_duration = room_data.get('bet_timer_duration', 30)
 
-    # Create and start the game
-    game = Game(sids=sids, room=room_id, usernames=usernames, bot_flags=bot_flags)
+    print(f"Starting game in room {room_id} with {len(sids)} players ({sum(bot_flags)} bots), timer: {bet_timer_duration}s")
+
+    # Create and start the game with timer settings
+    game = Game(sids=sids, room=room_id, usernames=usernames, bot_flags=bot_flags, bet_timer_duration=bet_timer_duration, socketio=socketio)
     game.deal()
     games[room_id] = game
 
@@ -509,9 +623,67 @@ def leave_game():
                 }, to=player_sid)
                 print(f"Sent removed_from_room to {player_sid[-4:]}")
 
-        # Remove player from room
-        room_data['players'] = [p for p in room_data['players'] if p[0] != request.sid]
-        print(f"Player removed. Remaining players: {len(room_data['players'])}")
+        # Check if game is in progress
+        game_started = room_data.get('game_started', False)
+
+        if not game_started:
+            # Game hasn't started, safe to remove player from room
+            room_data['players'] = [p for p in room_data['players'] if p[0] != request.sid]
+            print(f"Player removed. Remaining players: {len(room_data['players'])}")
+        else:
+            # Game in progress - keep player in list for reconnection
+            # Mark player as inactive in the game and handle bot takeover
+            print(f"Player {player_username} left during game - keeping in room for reconnection")
+
+            # Find and mark player inactive in the game
+            if player_room_id in games:
+                game = games[player_room_id]
+                player = game.mark_player_inactive(request.sid)
+
+                if player:
+                    # Notify other players
+                    socketio.emit("game_update", {
+                        'sid': request.sid,
+                        'text': f"{player.username} left the game. Game continues with remaining players.",
+                        'json': {
+                            'action': 'player_disconnected',
+                            'disconnected_player_sid': request.sid,
+                            'players': [{'sid': p.sid, 'username': p.username, 'hand_count': p.hand_count, 'is_active': p.is_active, 'is_bot': p.is_bot} for p in game.players]
+                        }
+                    }, room=player_room_id)
+
+                    # If it was their turn, let bot play or skip turn
+                    if game.players[game.player_turn_index].sid == request.sid:
+                        current_player = game.players[game.player_turn_index]
+
+                        # If player was converted to bot, let the bot play
+                        if current_player.is_bot:
+                            print(f"Player {player.username} was converted to bot - triggering bot turn processing")
+                            # Trigger bot turn processing in a background task
+                            socketio.start_background_task(game._process_bot_turn)
+                        else:
+                            # Player wasn't converted to bot (wasn't in active deal), skip turn
+                            next_index = game.get_next_active_player_index(game.player_turn_index + 1)
+                            if next_index is not None:
+                                game.player_turn_index = next_index
+                                next_player = game.players[game.player_turn_index]
+                                socketio.emit("game_update", {
+                                    'text': f"Turn skipped to {next_player.username}.",
+                                    'json': {
+                                        'action': 'turn_skipped',
+                                        'player_turn_index': game.player_turn_index,
+                                        'current_player_sid': next_player.sid,
+                                        'current_player_username': next_player.username,
+                                        'last_bet': game.last_bet,
+                                        'players': [{'sid': p.sid, 'username': p.username, 'hand_count': p.hand_count, 'last_bet': p.last_bet, 'is_active': p.is_active, 'is_bot': p.is_bot} for p in game.players],
+                                        'deal_in_progress': game.deal_in_progess,
+                                        'game_finished': game.game_finished
+                                    }
+                                }, room=player_room_id)
+
+                                # If next player is also a bot, trigger bot processing
+                                if next_player.is_bot:
+                                    socketio.start_background_task(game._process_bot_turn)
 
         # Leave socket.io room
         leave_room(room=player_room_id, sid=request.sid)
@@ -664,25 +836,37 @@ def disconnect(data=None):
                 }
             }, room=game.room)
 
-            # If it was their turn, notify that turn is being skipped
+            # If it was their turn, let bot play or skip turn
             if game.players[game.player_turn_index].sid == request.sid:
-                next_index = game.get_next_active_player_index(game.player_turn_index + 1)
-                if next_index is not None:
-                    game.player_turn_index = next_index
-                    next_player = game.players[game.player_turn_index]
-                    emit("game_update", {
-                        'text': f"Turn skipped to {next_player.username}.",
-                        'json': {
-                            'action': 'turn_skipped',
-                            'player_turn_index': game.player_turn_index,
-                            'current_player_sid': next_player.sid,
-                            'current_player_username': next_player.username,
-                            'last_bet': game.last_bet,
-                            'players': [{'sid': p.sid, 'username': p.username, 'hand_count': p.hand_count, 'last_bet': p.last_bet, 'is_active': p.is_active} for p in game.players],
-                            'deal_in_progress': game.deal_in_progess,
-                            'game_finished': game.game_finished
-                        }
-                    }, room=game.room)
+                current_player = game.players[game.player_turn_index]
+
+                # If player was converted to bot, let the bot play
+                if current_player.is_bot:
+                    # Trigger bot turn processing in a background task
+                    socketio.start_background_task(game._process_bot_turn)
+                else:
+                    # Player wasn't converted to bot (wasn't in active deal), skip turn
+                    next_index = game.get_next_active_player_index(game.player_turn_index + 1)
+                    if next_index is not None:
+                        game.player_turn_index = next_index
+                        next_player = game.players[game.player_turn_index]
+                        emit("game_update", {
+                            'text': f"Turn skipped to {next_player.username}.",
+                            'json': {
+                                'action': 'turn_skipped',
+                                'player_turn_index': game.player_turn_index,
+                                'current_player_sid': next_player.sid,
+                                'current_player_username': next_player.username,
+                                'last_bet': game.last_bet,
+                                'players': [{'sid': p.sid, 'username': p.username, 'hand_count': p.hand_count, 'last_bet': p.last_bet, 'is_active': p.is_active} for p in game.players],
+                                'deal_in_progress': game.deal_in_progess,
+                                'game_finished': game.game_finished
+                            }
+                        }, room=game.room)
+
+                        # If next player is also a bot, trigger bot processing
+                        if next_player.is_bot:
+                            socketio.start_background_task(game._process_bot_turn)
 
             # Check if game should end (only 1 or 0 active players remaining)
             active_players = game.get_active_players()
