@@ -448,8 +448,9 @@ class Game:
             self.player_turn_index = new_loser_index
         else:
             # Loser was eliminated, start with the player who was after them
-            # Find the next active player from position 0
-            self.player_turn_index = 0
+            # After deletion, loser_player_index now points to the next player
+            # (unless it was the last player, then wrap to 0)
+            self.player_turn_index = loser_player_index % len(self.players) if len(self.players) > 0 else 0
 
         # Ensure we're pointing to an active player
         self.player_turn_index = self.get_next_active_player_index(self.player_turn_index)

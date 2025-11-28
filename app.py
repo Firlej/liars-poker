@@ -374,6 +374,35 @@ def add_bot_to_room(data):
     # Update rooms list for everyone
     socketio.emit("rooms_update", {'rooms': get_rooms_list()})
 
+@socketio.on("shuffle_players")
+def shuffle_players(data):
+    """Shuffle player order in a room (for debugging/variety)"""
+    room_id = data.get('roomId')
+
+    # Validate room exists
+    if not room_id or room_id not in manual_rooms:
+        emit("error", {'message': "Room does not exist"}, sid=request.sid)
+        return
+
+    room_data = manual_rooms[room_id]
+
+    # Only creator can shuffle
+    if room_data['created_by'] != request.sid:
+        emit("error", {'message': "Only room creator can shuffle players"}, sid=request.sid)
+        return
+
+    # Shuffle the players list
+    import random
+    random.shuffle(room_data['players'])
+    print(f"Players shuffled in room {room_id}")
+
+    # Notify all players in the room
+    socketio.emit("room_update", {
+        'roomName': room_id,
+        'players': room_data['players'],
+        'creatorSid': room_data['created_by']
+    }, room=room_id)
+
 @socketio.on("start_manual_room_game")
 def start_manual_room_game(data):
     """Start game from manual room"""
