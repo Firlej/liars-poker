@@ -53,8 +53,10 @@ class Game:
 
         self.player_turn_index = 0
         self.last_bettor_index = None  # Track who made the last bet
+        self.last_bet = None  # Initialize last_bet to prevent AttributeError
+        self.bot_processing_lock = False  # Prevent concurrent bot turn processing
 
-        self.deal_in_progess = False
+        self.deal_in_progress = False
         self.game_finished = False
 
         print("players", self.players)
@@ -81,6 +83,13 @@ class Game:
 
         return None
 
+    def get_player_index_by_sid(self, sid: str):
+        """Find player index by their SID. Returns None if not found."""
+        for i, player in enumerate(self.players):
+            if player.sid == sid:
+                return i
+        return None
+
     def mark_player_inactive(self, sid: str):
         """Mark a player as inactive (disconnected) but keep them in the game."""
         player = next((p for p in self.players if p.sid == sid), None)
@@ -100,34 +109,43 @@ class Game:
 
     def _process_bot_turn(self):
         """Process bot turns automatically until it's a human's turn."""
-        # Add delay to make bot moves visible
-        gevent.sleep(1.5)
+        # Check if already processing bots (prevent race condition)
+        if self.bot_processing_lock:
+            return
 
-        while self.deal_in_progess and not self.game_finished:
-            current_player = self.players[self.player_turn_index]
+        self.bot_processing_lock = True
+        try:
+            # Add delay to make bot moves visible
+            gevent.sleep(1.5)
 
-            # Check if current player is a bot
-            if not current_player.is_bot or not current_player.is_active:
-                break
+            while self.deal_in_progress and not self.game_finished:
+                current_player = self.players[self.player_turn_index]
 
-            # Get bot instance
-            bot = self.bots.get(current_player.sid)
-            if bot is None:
-                break
+                # Check if current player is a bot
+                if not current_player.is_bot or not current_player.is_active:
+                    break
 
-            # Let bot make decision
-            decision = bot.make_decision()
+                # Get bot instance
+                bot = self.bots.get(current_player.sid)
+                if bot is None:
+                    break
 
-            # Execute bot's move
-            self.make_move(current_player.sid, decision)
+                # Let bot make decision
+                decision = bot.make_decision()
 
-            # Delay between bot moves
-            if self.deal_in_progess and not self.game_finished:
-                gevent.sleep(1.5)
+                # Execute bot's move
+                self.make_move(current_player.sid, decision)
+
+                # Delay between bot moves
+                if self.deal_in_progress and not self.game_finished:
+                    gevent.sleep(1.5)
+        finally:
+            # Always release the lock
+            self.bot_processing_lock = False
 
     def deal(self):
 
-        assert not self.deal_in_progess
+        assert not self.deal_in_progress
 
         active_players = self.get_active_players()
 
@@ -175,7 +193,7 @@ class Game:
 
         self.last_bet = None
         self.last_bettor_index = None  # Reset last bettor for new deal
-        self.deal_in_progess = True  # Set this BEFORE emitting events
+        self.deal_in_progress = True  # Set this BEFORE emitting events
 
         for p in self.players:
             if not p.is_active or p.is_bot:
@@ -190,7 +208,7 @@ class Game:
                     'last_bet': None,
                     'player_turn_index': self.player_turn_index,
                     'players': [{'sid': p.sid, 'username': p.username, 'hand_count': p.hand_count, 'last_bet': p.last_bet, 'is_active': p.is_active} for p in self.players],
-                    'deal_in_progress': self.deal_in_progess,
+                    'deal_in_progress': self.deal_in_progress,
                     'game_finished': self.game_finished,
                     'your_hand': p.hand.cards
                 }
@@ -214,6 +232,8 @@ class Game:
                 return
             current_player = self.players[self.player_turn_index]
 
+        # CRITICAL: Validate that the move is from the current player
+        # This prevents disconnected players' moves from being applied to active players
         if current_player.sid != sid:
 
             self.emit('game_update', {
@@ -247,7 +267,7 @@ class Game:
                     'last_bet': self.last_bet,
                     'player_turn_index': self.player_turn_index,
                     'players': [{'sid': p.sid, 'username': p.username, 'hand_count': p.hand_count, 'last_bet': p.last_bet, 'is_active': p.is_active} for p in self.players],
-                    'deal_in_progress': self.deal_in_progess,
+                    'deal_in_progress': self.deal_in_progress,
                     'game_finished': self.game_finished,
                     'player_hands': player_hands
                 }
@@ -312,7 +332,7 @@ class Game:
                 'last_bet': self.last_bet,
                 'player_turn_index': self.player_turn_index,
                 'players': [{'sid': p.sid, 'username': p.username, 'hand_count': p.hand_count, 'last_bet': p.last_bet, 'is_active': p.is_active} for p in self.players],
-                'deal_in_progress': self.deal_in_progess,
+                'deal_in_progress': self.deal_in_progress,
                 'game_finished': self.game_finished
             }
         })
@@ -328,6 +348,7 @@ class Game:
     def finish_deal(self, loser_player_index = None):
 
         loser = self.players[loser_player_index]
+        loser_sid = loser.sid  # Store SID before potential deletion
 
         # If loser is inactive (disconnected), they're effectively already out
         if not loser.is_active:
@@ -340,8 +361,21 @@ class Game:
             loser.hand_count += 1
             MAX_CARDS = 3
 
+            # Calculate the next turn index BEFORE emitting
+            # Set next turn to the loser by SID (for when they're not eliminated)
+            next_turn_index = loser_player_index
+
             self.emit('game_update', {
-                'text': f"{loser.username} lost the deal!"
+                'text': f"{loser.username} lost the deal!",
+                'json': {
+                    'action': 'deal_result',
+                    'loser_sid': loser.sid,
+                    'loser_username': loser.username,
+                    'player_turn_index': next_turn_index,
+                    'players': [{'sid': p.sid, 'username': p.username, 'hand_count': p.hand_count, 'last_bet': p.last_bet, 'is_active': p.is_active} for p in self.players],
+                    'deal_in_progress': self.deal_in_progress,
+                    'game_finished': self.game_finished
+                }
             })
 
             # Add delay to allow frontend to process lost event
@@ -351,8 +385,21 @@ class Game:
 
             if loser.hand_count > MAX_CARDS:
 
+                # After elimination, next player should be the one after loser
+                # But we need to recalculate after deletion
+                next_turn_after_elimination = loser_player_index % max(1, len(self.players) - 1)
+
                 self.emit('game_update', {
-                    'text': f"{loser.username} is out!"
+                    'text': f"{loser.username} is out!",
+                    'json': {
+                        'action': 'player_eliminated',
+                        'eliminated_sid': loser.sid,
+                        'eliminated_username': loser.username,
+                        'player_turn_index': next_turn_after_elimination,
+                        'players': [{'sid': p.sid, 'username': p.username, 'hand_count': p.hand_count, 'last_bet': p.last_bet, 'is_active': p.is_active} for p in self.players],
+                        'deal_in_progress': self.deal_in_progress,
+                        'game_finished': self.game_finished
+                    }
                 })
 
                 # Add delay to allow frontend to process elimination event
@@ -365,29 +412,42 @@ class Game:
         if len(active_players) <= 1:
             if len(active_players) == 1:
                 winner = active_players[0]
+                winner_index = self.get_player_index_by_sid(winner.sid)
                 self.emit('game_update', {
                     'text': f"{winner.username} won!",
                     'json': {
                         'action': 'game_won',
                         'winner_sid': winner.sid,
                         'winner_username': winner.username,
-                        'players': [{'sid': p.sid, 'username': p.username, 'hand_count': p.hand_count, 'last_bet': p.last_bet, 'is_active': p.is_active} for p in self.players]
+                        'player_turn_index': winner_index if winner_index is not None else 0,
+                        'players': [{'sid': p.sid, 'username': p.username, 'hand_count': p.hand_count, 'last_bet': p.last_bet, 'is_active': p.is_active} for p in self.players],
+                        'deal_in_progress': False,
+                        'game_finished': True
                     }
                 })
                 # Add delay to allow frontend to process won event
                 gevent.sleep(0.5)
             else:
                 self.emit('game_update', {
-                    'text': "Game ended - no active players remaining."
+                    'text': "Game ended - no active players remaining.",
+                    'json': {
+                        'action': 'game_end',
+                        'deal_in_progress': False,
+                        'game_finished': True
+                    }
                 })
             self.game_finished = True
             return
 
 
-        # Set next turn to the loser (or next active player if loser was eliminated)
-        if loser_player_index < len(self.players):
-            self.player_turn_index = loser_player_index % len(self.players)
+        # Set next turn to the loser by SID (indices may have shifted after deletion)
+        new_loser_index = self.get_player_index_by_sid(loser_sid)
+        if new_loser_index is not None:
+            # Loser is still in game, they start next deal
+            self.player_turn_index = new_loser_index
         else:
+            # Loser was eliminated, start with the player who was after them
+            # Find the next active player from position 0
             self.player_turn_index = 0
 
         # Ensure we're pointing to an active player
@@ -396,7 +456,7 @@ class Game:
             self.game_finished = True
             return
 
-        self.deal_in_progess = False
+        self.deal_in_progress = False
 
         # Note: We don't call _process_bot_turn here because finish_deal ends the current deal
         # The next deal will be started by the user/system and will handle bot turns

@@ -253,7 +253,7 @@ def join_manual_room(data):
             'player_turn_index': game.player_turn_index,
             'last_bet': game.last_bet,
             'players': [{'sid': p.sid, 'username': p.username, 'hand_count': p.hand_count, 'last_bet': p.last_bet, 'is_active': p.is_active} for p in game.players],
-            'deal_in_progress': game.deal_in_progess,
+            'deal_in_progress': game.deal_in_progress,
             'game_finished': game.game_finished
         }
 
@@ -439,7 +439,7 @@ def bet(data):
             del manual_rooms[game.room]
             socketio.emit("rooms_update", {'rooms': get_rooms_list()})
 
-    if not game.deal_in_progess:
+    if not game.deal_in_progress:
         game.deal()
 
 @socketio.on("leave_game")
@@ -585,7 +585,7 @@ def leave_game():
                         'current_player_username': next_player.username,
                         'last_bet': game.last_bet,
                         'players': [{'sid': p.sid, 'username': p.username, 'hand_count': p.hand_count, 'last_bet': p.last_bet, 'is_active': p.is_active} for p in game.players],
-                        'deal_in_progress': game.deal_in_progess,
+                        'deal_in_progress': game.deal_in_progress,
                         'game_finished': game.game_finished
                     }
                 }, room=game.room)
@@ -679,7 +679,7 @@ def disconnect(data=None):
                             'current_player_username': next_player.username,
                             'last_bet': game.last_bet,
                             'players': [{'sid': p.sid, 'username': p.username, 'hand_count': p.hand_count, 'last_bet': p.last_bet, 'is_active': p.is_active} for p in game.players],
-                            'deal_in_progress': game.deal_in_progess,
+                            'deal_in_progress': game.deal_in_progress,
                             'game_finished': game.game_finished
                         }
                     }, room=game.room)
