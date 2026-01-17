@@ -5,6 +5,7 @@ from flask_socketio import emit
 import random
 import time
 import gevent
+from gevent.lock import BoundedSemaphore
 
 from Solver import Solver, combinations# Player = namedtuple("Player", ["name", "hand", "solver"])
 
@@ -18,9 +19,10 @@ class Player:
         self.username = username
         self.is_active = True  # Track if player is still connected/active
         self.is_bot = is_bot  # Track if player is a bot
+        self.ready_for_next_deal = False  # Track if player is ready for next deal
 
     def __repr__(self) -> str:
-        return f"Player(sid={self.sid}, hand_count={self.hand_count}, last_bet={self.last_bet}, is_active={self.is_active}, is_bot={self.is_bot}, hand={self.hand}, solver={self.solver})"
+        return f"Player(sid={self.sid}, hand_count={self.hand_count}, last_bet={self.last_bet}, is_active={self.is_active}, is_bot={self.is_bot}, ready={self.ready_for_next_deal}, hand={self.hand}, solver={self.solver})"
     
 
 class Game:
@@ -54,7 +56,7 @@ class Game:
         self.player_turn_index = 0
         self.last_bettor_index = None  # Track who made the last bet
         self.last_bet = None  # Initialize last_bet to prevent AttributeError
-        self.bot_processing_lock = False  # Prevent concurrent bot turn processing
+        self.bot_processing_lock = BoundedSemaphore(1)  # Prevent concurrent bot turn processing
 
         self.deal_in_progress = False
         self.game_finished = False
@@ -97,7 +99,159 @@ class Game:
             player.is_active = False
             return player
         return None
-        
+
+    def validate_game_state(self):
+        """
+        Check for invalid game states that could cause the game to become stuck.
+        Returns a tuple: (is_valid, list_of_issues)
+        """
+        issues = []
+
+        # Check 1: player_turn_index bounds
+        if self.player_turn_index < 0 or self.player_turn_index >= len(self.players):
+            issues.append(f"player_turn_index {self.player_turn_index} out of bounds (0-{len(self.players)-1})")
+
+        # Check 2: Current player is active (only if deal is in progress)
+        if self.deal_in_progress and len(self.players) > 0:
+            if 0 <= self.player_turn_index < len(self.players):
+                current_player = self.players[self.player_turn_index]
+                if not current_player.is_active:
+                    issues.append(f"current player {current_player.username} is inactive but it's their turn")
+
+        # Check 3: At least one active player exists
+        active_players = self.get_active_players()
+        if len(active_players) == 0 and not self.game_finished:
+            issues.append("no active players but game not marked as finished")
+
+        # Check 4: Inconsistent flags - deal in progress but game finished
+        if self.deal_in_progress and self.game_finished:
+            issues.append("deal_in_progress=True but game_finished=True")
+
+        # Check 5: last_bettor_index bounds (if set)
+        if self.last_bettor_index is not None:
+            if self.last_bettor_index < 0 or self.last_bettor_index >= len(self.players):
+                issues.append(f"last_bettor_index {self.last_bettor_index} out of bounds")
+
+        return (len(issues) == 0, issues)
+
+    def recover_game_state(self):
+        """
+        Attempt to recover from invalid game states.
+        Returns True if recovery was successful, False if game should end.
+        """
+        is_valid, issues = self.validate_game_state()
+
+        if is_valid:
+            return True  # Nothing to recover
+
+        print(f"[RECOVERY] Detected issues: {issues}")
+
+        # Recovery 1: Fix out-of-bounds player_turn_index
+        if self.player_turn_index < 0 or self.player_turn_index >= len(self.players):
+            if len(self.players) > 0:
+                self.player_turn_index = self.player_turn_index % len(self.players)
+                print(f"[RECOVERY] Corrected player_turn_index to {self.player_turn_index}")
+            else:
+                self.game_finished = True
+                print("[RECOVERY] No players left, ending game")
+                return False
+
+        # Recovery 2: Find next active player if current is inactive
+        if self.deal_in_progress:
+            current_player = self.players[self.player_turn_index]
+            if not current_player.is_active:
+                next_index = self.get_next_active_player_index(self.player_turn_index)
+                if next_index is not None:
+                    self.player_turn_index = next_index
+                    print(f"[RECOVERY] Moved turn to next active player at index {next_index}")
+                else:
+                    self.game_finished = True
+                    print("[RECOVERY] No active players, ending game")
+                    return False
+
+        # Recovery 3: Fix inconsistent flags
+        if self.deal_in_progress and self.game_finished:
+            self.deal_in_progress = False
+            print("[RECOVERY] Reset deal_in_progress to False since game is finished")
+
+        # Recovery 4: No active players
+        if len(self.get_active_players()) == 0:
+            self.game_finished = True
+            print("[RECOVERY] No active players, ending game")
+            return False
+
+        # Recovery 5: Fix out-of-bounds last_bettor_index
+        if self.last_bettor_index is not None:
+            if self.last_bettor_index < 0 or self.last_bettor_index >= len(self.players):
+                self.last_bettor_index = None
+                print("[RECOVERY] Reset invalid last_bettor_index to None")
+
+        # Emit state update to clients after recovery
+        self.emit('game_update', {
+            'text': 'Game state recovered',
+            'json': {
+                'action': 'state_recovered',
+                'player_turn_index': self.player_turn_index,
+                'players': [{'sid': p.sid, 'username': p.username, 'hand_count': p.hand_count, 'last_bet': p.last_bet, 'is_active': p.is_active} for p in self.players],
+                'deal_in_progress': self.deal_in_progress,
+                'game_finished': self.game_finished,
+                'last_bet': self.last_bet
+            }
+        })
+
+        return True
+
+    def all_players_ready_for_next_deal(self):
+        """Check if all active human players are ready for the next deal. Bots are always considered ready."""
+        active_players = self.get_active_players()
+        has_human = False
+        for player in active_players:
+            # Bots are always ready
+            if player.is_bot:
+                continue
+            # Found a human player
+            has_human = True
+            # Human players must explicitly be ready
+            if not player.ready_for_next_deal:
+                return False
+        # If no human players exist, return False (should use all_bots check instead)
+        # This prevents the ready system from triggering when only bots remain
+        return has_human
+
+    def reset_ready_states(self):
+        """Reset all players' ready states to False."""
+        for player in self.players:
+            player.ready_for_next_deal = False
+
+    def mark_player_ready(self, sid: str):
+        """Mark a player as ready for the next deal. Returns True if all players are now ready."""
+        player = next((p for p in self.players if p.sid == sid), None)
+        if player:
+            player.ready_for_next_deal = True
+
+            # Emit update to all players about ready status
+            self.emit('game_update', {
+                'text': f'{player.username} is ready for next deal',
+                'json': {
+                    'action': 'player_ready',
+                    'player_sid': sid,
+                    'players_ready': [p.sid for p in self.players if p.ready_for_next_deal],
+                    'players': [{'sid': p.sid, 'username': p.username, 'hand_count': p.hand_count, 'last_bet': p.last_bet, 'is_active': p.is_active, 'ready_for_next_deal': p.ready_for_next_deal} for p in self.players],
+                    'player_turn_index': self.player_turn_index,
+                    'deal_in_progress': self.deal_in_progress,
+                    'game_finished': self.game_finished
+                }
+            })
+
+            # Check if all players are ready
+            if self.all_players_ready_for_next_deal():
+                # Reset ready states
+                self.reset_ready_states()
+                # Start the next deal
+                self.deal()
+                return True
+        return False
+
     def emit(self, event, data = {}, to = None):
 
         if to is None:
@@ -109,16 +263,36 @@ class Game:
 
     def _process_bot_turn(self):
         """Process bot turns automatically until it's a human's turn."""
-        # Check if already processing bots (prevent race condition)
-        if self.bot_processing_lock:
+        # Try to acquire lock (non-blocking) to prevent concurrent bot processing
+        acquired = self.bot_processing_lock.acquire(blocking=False)
+        if not acquired:
             return
 
-        self.bot_processing_lock = True
         try:
             # Add delay to make bot moves visible
             gevent.sleep(1.5)
 
+            # Safety counter to prevent infinite loops
+            # 500 is high enough for legitimate games (even with many bots)
+            # but still catches true infinite loops
+            max_iterations = 500
+            iterations = 0
+
             while self.deal_in_progress and not self.game_finished:
+                iterations += 1
+                if iterations > max_iterations:
+                    print(f"[BOT WARNING] Exceeded max iterations ({max_iterations}), breaking loop")
+                    break
+
+                # Validate state before processing
+                if not self.recover_game_state():
+                    break
+
+                # Bounds check before accessing players
+                if self.player_turn_index < 0 or self.player_turn_index >= len(self.players):
+                    print(f"[BOT ERROR] Invalid player_turn_index: {self.player_turn_index}")
+                    break
+
                 current_player = self.players[self.player_turn_index]
 
                 # Check if current player is a bot
@@ -128,20 +302,31 @@ class Game:
                 # Get bot instance
                 bot = self.bots.get(current_player.sid)
                 if bot is None:
+                    print(f"[BOT ERROR] Bot instance not found for {current_player.username}")
                     break
 
-                # Let bot make decision
-                decision = bot.make_decision()
+                try:
+                    # Let bot make decision
+                    decision = bot.make_decision()
 
-                # Execute bot's move
-                self.make_move(current_player.sid, decision)
+                    # Execute bot's move
+                    self.make_move(current_player.sid, decision)
+                except Exception as e:
+                    print(f"[BOT ERROR] Exception during bot turn: {e}")
+                    # Skip this bot's turn to prevent infinite loop
+                    next_index = self.get_next_active_player_index(self.player_turn_index + 1)
+                    if next_index is not None:
+                        self.player_turn_index = next_index
+                    else:
+                        self.game_finished = True
+                    break
 
                 # Delay between bot moves
                 if self.deal_in_progress and not self.game_finished:
                     gevent.sleep(1.5)
         finally:
             # Always release the lock
-            self.bot_processing_lock = False
+            self.bot_processing_lock.release()
 
     def deal(self):
 
@@ -220,6 +405,32 @@ class Game:
         return
 
     def make_move(self, sid: str, bet: str):
+
+        # State validation before processing any move
+        is_valid, issues = self.validate_game_state()
+        if not is_valid:
+            print(f"[MAKE_MOVE] Invalid state detected: {issues}")
+            if not self.recover_game_state():
+                self.emit('game_update', {
+                    'text': "Game error: Unable to recover game state. Please start a new game.",
+                    'json': {
+                        'action': 'game_error',
+                        'error': 'unrecoverable_state',
+                        'issues': issues
+                    }
+                }, to=sid)
+                return
+
+        # Bounds check before accessing players array
+        if self.player_turn_index < 0 or self.player_turn_index >= len(self.players):
+            self.emit('game_update', {
+                'text': "Game error: Invalid turn index. Please wait for game state to sync.",
+                'json': {
+                    'action': 'game_error',
+                    'error': 'invalid_turn_index'
+                }
+            }, to=sid)
+            return
 
         current_player = self.players[self.player_turn_index]
 
@@ -460,16 +671,79 @@ class Game:
 
         self.deal_in_progress = False
 
-        # Start the next deal immediately
-        # This is critical - if the next player is a bot, we need to deal now
-        # Otherwise the game will hang waiting for a human move that triggers deal()
-        self.deal()
+        # Check if all players are bots - if so, start next deal immediately
+        active_players = self.get_active_players()
+        all_bots = all(p.is_bot for p in active_players)
+
+        if all_bots:
+            # All bots - start next deal immediately
+            self.deal()
+        else:
+            # There are human players - wait for them to be ready
+            # Emit a waiting_for_ready event to notify clients
+            self.emit('game_update', {
+                'text': 'Waiting for players to be ready...',
+                'json': {
+                    'action': 'waiting_for_ready',
+                    'players_ready': [p.sid for p in self.players if p.ready_for_next_deal],
+                    'players': [{'sid': p.sid, 'username': p.username, 'hand_count': p.hand_count, 'last_bet': p.last_bet, 'is_active': p.is_active, 'ready_for_next_deal': p.ready_for_next_deal} for p in self.players],
+                    'player_turn_index': self.player_turn_index,
+                    'deal_in_progress': self.deal_in_progress,
+                    'game_finished': self.game_finished
+                }
+            })
 
         return
 
+    def get_game_state(self, for_sid=None):
+        """
+        Returns a serializable dict of the current game state.
+        Used for state resync when clients request it.
+
+        Args:
+            for_sid: If provided, include that player's hand in the response
+        """
+        player_list = []
+        for p in self.players:
+            player_data = {
+                'sid': p.sid,
+                'username': p.username,
+                'hand_count': p.hand_count,
+                'last_bet': p.last_bet,
+                'is_active': p.is_active,
+                'is_bot': p.is_bot,
+                'ready_for_next_deal': p.ready_for_next_deal
+            }
+            player_list.append(player_data)
+
+        state = {
+            'room': self.room,
+            'player_turn_index': self.player_turn_index,
+            'last_bet': self.last_bet,
+            'last_bettor_index': self.last_bettor_index,
+            'deal_in_progress': self.deal_in_progress,
+            'game_finished': self.game_finished,
+            'players': player_list,
+            'players_ready': [p.sid for p in self.players if p.ready_for_next_deal]
+        }
+
+        # Include the requesting player's hand if they're in the game
+        if for_sid:
+            player = next((p for p in self.players if p.sid == for_sid), None)
+            if player and player.hand is not None:
+                state['your_hand'] = player.hand.cards
+
+        # Include validation status
+        is_valid, issues = self.validate_game_state()
+        state['state_valid'] = is_valid
+        if not is_valid:
+            state['state_issues'] = issues
+
+        return state
+
     def end(self):
         pass
-        
+
 if __name__ == "__main__":
     player_ids = ["A", "B", "C"]
     game = Game(player_ids) # Initialize a game with 3 players

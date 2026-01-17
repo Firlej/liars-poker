@@ -85,7 +85,10 @@ class TestGameInitialization(unittest.TestCase):
         self.assertIsNone(game.last_bettor_index)
         self.assertFalse(game.deal_in_progress)
         self.assertFalse(game.game_finished)
-        self.assertFalse(game.bot_processing_lock)
+        # bot_processing_lock is now a BoundedSemaphore, verify it's available
+        acquired = game.bot_processing_lock.acquire(blocking=False)
+        self.assertTrue(acquired)  # Lock should be available
+        game.bot_processing_lock.release()
         self.assertEqual(game.player_turn_index, 0)
 
 
@@ -450,16 +453,21 @@ class TestBotProcessing(unittest.TestCase):
         """Test that bot processing lock prevents race conditions"""
         game = Game(['p1'], 'test_room', ['P1'])
 
-        # Set lock
-        game.bot_processing_lock = True
+        # Acquire lock to simulate ongoing processing
+        acquired = game.bot_processing_lock.acquire(blocking=False)
+        self.assertTrue(acquired)  # Should be able to acquire initially
 
-        # Try to process bot turn
+        # Try to process bot turn - should return immediately
         with patch('Game.gevent'):
             game._process_bot_turn()
 
-        # Should return immediately without processing
-        # (In real implementation, would check that no moves were made)
-        self.assertTrue(game.bot_processing_lock)
+        # Release lock for cleanup
+        game.bot_processing_lock.release()
+
+        # Verify lock can be acquired again (was properly released)
+        acquired_again = game.bot_processing_lock.acquire(blocking=False)
+        self.assertTrue(acquired_again)
+        game.bot_processing_lock.release()
 
 
 if __name__ == '__main__':

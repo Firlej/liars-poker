@@ -471,6 +471,41 @@ def bet(data):
     if not game.deal_in_progress:
         game.deal()
 
+@socketio.on("ready_for_next_deal")
+def ready_for_next_deal():
+    print("ready_for_next_deal", request.sid[-4:])
+
+    game: Game = next(filter(lambda g: request.sid in g.sids, games.values()), None)
+
+    if game is None:
+        emit("message", {'text': "youre not in game"}, sid=request.sid)
+        return
+
+    game.mark_player_ready(request.sid)
+
+@socketio.on("request_game_state")
+def request_game_state():
+    """Allow clients to request the current game state for resync."""
+    print("request_game_state", request.sid[-4:])
+
+    game: Game = next(filter(lambda g: request.sid in g.sids, games.values()), None)
+
+    if game is None:
+        emit("game_state_response", {
+            'success': False,
+            'error': 'not_in_game',
+            'message': "You're not in a game"
+        }, sid=request.sid)
+        return
+
+    # Get current game state for this player
+    state = game.get_game_state(for_sid=request.sid)
+
+    emit("game_state_response", {
+        'success': True,
+        'state': state
+    }, sid=request.sid)
+
 @socketio.on("leave_game")
 def leave_game():
     print("leave_game", request.sid[-4:])
