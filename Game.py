@@ -1,7 +1,6 @@
 from typing import List
 from Deck import Deck
 from collections import namedtuple
-from flask_socketio import emit
 import random
 import time
 import gevent
@@ -26,13 +25,17 @@ class Player:
     
 
 class Game:
+    # Timeout constants (in seconds)
+    TURN_TIMEOUT_SECONDS = 60  # How long to wait for a player's turn
+    READY_TIMEOUT_SECONDS = 60  # How long to wait for ready confirmations
 
-    def __init__(self, sids: List[str], room: str, usernames: List[str], bot_flags: List[bool] = None):
+    def __init__(self, sids: List[str], room: str, usernames: List[str], bot_flags: List[bool] = None, socketio=None):
 
         print("usernames", usernames)
         self.room = room
         self.sids = sids
         self.usernames = usernames
+        self.socketio = socketio  # Store socketio instance for emitting events
 
         # Handle bot flags - default to all human players if not specified
         if bot_flags is None:
@@ -60,6 +63,12 @@ class Game:
 
         self.deal_in_progress = False
         self.game_finished = False
+
+        # Turn timeout tracking
+        self.turn_start_time = None
+
+        # Ready phase timeout tracking
+        self.ready_phase_start_time = None
 
         print("players", self.players)
 
@@ -97,6 +106,193 @@ class Game:
         player = next((p for p in self.players if p.sid == sid), None)
         if player:
             player.is_active = False
+            return player
+        return None
+
+    def start_turn_timer(self):
+        """Start the turn timer for the current player."""
+        self.turn_start_time = time.time()
+
+    def check_turn_timeout(self) -> bool:
+        """Check if the current turn has timed out. Returns True if timeout exceeded."""
+        if self.turn_start_time is None:
+            return False
+        if not self.deal_in_progress:
+            return False
+        # Don't timeout bots - they handle their own timing
+        if self.player_turn_index < len(self.players):
+            current_player = self.players[self.player_turn_index]
+            if current_player.is_bot:
+                return False
+        return (time.time() - self.turn_start_time) > self.TURN_TIMEOUT_SECONDS
+
+    def handle_turn_timeout(self):
+        """Handle a turn timeout by marking the player inactive and advancing the turn."""
+        if not self.deal_in_progress or self.game_finished:
+            return False
+
+        if self.player_turn_index < 0 or self.player_turn_index >= len(self.players):
+            return False
+
+        current_player = self.players[self.player_turn_index]
+
+        # Don't timeout bots
+        if current_player.is_bot:
+            return False
+
+        print(f"[TIMEOUT] Turn timeout for {current_player.username}")
+
+        # Mark player as inactive (treat timeout as disconnect)
+        current_player.is_active = False
+
+        # Emit timeout event
+        self.emit('game_update', {
+            'text': f"{current_player.username}'s turn timed out. They have been marked as disconnected.",
+            'json': {
+                'action': 'turn_timeout',
+                'timed_out_player_sid': current_player.sid,
+                'timed_out_player_username': current_player.username,
+                'players': [{'sid': p.sid, 'username': p.username, 'hand_count': p.hand_count, 'last_bet': p.last_bet, 'is_active': p.is_active} for p in self.players],
+                'deal_in_progress': self.deal_in_progress,
+                'game_finished': self.game_finished
+            }
+        })
+
+        # Find next active player
+        next_index = self.get_next_active_player_index(self.player_turn_index + 1)
+        if next_index is None:
+            # No active players left
+            self.game_finished = True
+            self.emit('game_update', {
+                'text': "Game ended - no active players remaining.",
+                'json': {
+                    'action': 'game_end',
+                    'deal_in_progress': False,
+                    'game_finished': True
+                }
+            })
+            return True
+
+        # Check if only one active player remains
+        active_players = self.get_active_players()
+        if len(active_players) == 1:
+            winner = active_players[0]
+            self.emit('game_update', {
+                'text': f"{winner.username} won! All other players have timed out or disconnected.",
+                'json': {
+                    'action': 'game_won',
+                    'winner_sid': winner.sid,
+                    'winner_username': winner.username,
+                    'deal_in_progress': False,
+                    'game_finished': True
+                }
+            })
+            self.game_finished = True
+            return True
+
+        # Advance to next player
+        self.player_turn_index = next_index
+        next_player = self.players[next_index]
+
+        # Reset turn timer for the new player
+        self.start_turn_timer()
+
+        self.emit('game_update', {
+            'text': f"Turn skipped to {next_player.username}.",
+            'json': {
+                'action': 'turn_skipped',
+                'player_turn_index': self.player_turn_index,
+                'current_player_sid': next_player.sid,
+                'current_player_username': next_player.username,
+                'last_bet': self.last_bet,
+                'players': [{'sid': p.sid, 'username': p.username, 'hand_count': p.hand_count, 'last_bet': p.last_bet, 'is_active': p.is_active} for p in self.players],
+                'deal_in_progress': self.deal_in_progress,
+                'game_finished': self.game_finished,
+                'turn_timeout_seconds': self.TURN_TIMEOUT_SECONDS
+            }
+        })
+
+        # Process bot turn if next player is a bot
+        if next_player.is_bot and next_player.is_active:
+            self._process_bot_turn()
+
+        return True
+
+    def start_ready_timer(self):
+        """Start the ready phase timer."""
+        self.ready_phase_start_time = time.time()
+
+    def check_ready_timeout(self) -> bool:
+        """Check if the ready phase has timed out. Returns True if timeout exceeded."""
+        if self.ready_phase_start_time is None:
+            return False
+        if self.deal_in_progress:
+            return False
+        if self.game_finished:
+            return False
+        return (time.time() - self.ready_phase_start_time) > self.READY_TIMEOUT_SECONDS
+
+    def handle_ready_timeout(self):
+        """Handle ready phase timeout by auto-readying inactive players and starting the deal."""
+        if self.deal_in_progress or self.game_finished:
+            return False
+
+        print("[TIMEOUT] Ready phase timeout - auto-readying disconnected players")
+
+        # Mark all inactive players as ready (they won't be included in the deal anyway)
+        # Also auto-ready any players who haven't clicked ready
+        for player in self.players:
+            if not player.is_active or not player.ready_for_next_deal:
+                if not player.is_bot:
+                    print(f"[TIMEOUT] Auto-readying {player.username} (active: {player.is_active})")
+                player.ready_for_next_deal = True
+
+        # Emit event about timeout
+        self.emit('game_update', {
+            'text': 'Ready phase timed out. Starting next deal...',
+            'json': {
+                'action': 'ready_timeout',
+                'players': [{'sid': p.sid, 'username': p.username, 'hand_count': p.hand_count, 'last_bet': p.last_bet, 'is_active': p.is_active, 'ready_for_next_deal': p.ready_for_next_deal} for p in self.players],
+                'deal_in_progress': self.deal_in_progress,
+                'game_finished': self.game_finished
+            }
+        })
+
+        # Reset ready phase timer
+        self.ready_phase_start_time = None
+
+        # Reset ready states and start the deal
+        self.reset_ready_states()
+        self.deal()
+        return True
+
+    def get_player_by_username(self, username: str):
+        """Find a player by their username. Returns None if not found."""
+        return next((p for p in self.players if p.username == username), None)
+
+    def reconnect_player(self, username: str, new_sid: str):
+        """
+        Reconnect a player with a new SID after reconnection.
+        Updates the player's SID and marks them as active.
+        Returns the player if found, None otherwise.
+        """
+        player = self.get_player_by_username(username)
+        if player:
+            old_sid = player.sid
+            player.sid = new_sid
+            player.is_active = True
+
+            # Update the sids list
+            for i, sid in enumerate(self.sids):
+                if sid == old_sid:
+                    self.sids[i] = new_sid
+                    break
+
+            # If this was a bot, update the bots dict
+            if old_sid in self.bots:
+                self.bots[new_sid] = self.bots.pop(old_sid)
+
+            print(f"[RECONNECT] Player {username} reconnected: {old_sid[-4:] if old_sid else 'None'} -> {new_sid[-4:]}")
             return player
         return None
 
@@ -259,7 +455,12 @@ class Game:
 
         print(f"Emmiting {data} to {to}")
 
-        emit(event, data, to = to)
+        if self.socketio:
+            self.socketio.emit(event, data, room=to)
+        else:
+            # Fallback for backwards compatibility (won't work in background tasks)
+            from flask_socketio import emit
+            emit(event, data, to=to)
 
     def _process_bot_turn(self):
         """Process bot turns automatically until it's a human's turn."""
@@ -395,9 +596,15 @@ class Game:
                     'players': [{'sid': p.sid, 'username': p.username, 'hand_count': p.hand_count, 'last_bet': p.last_bet, 'is_active': p.is_active} for p in self.players],
                     'deal_in_progress': self.deal_in_progress,
                     'game_finished': self.game_finished,
-                    'your_hand': p.hand.cards
+                    'your_hand': p.hand.cards,
+                    'turn_timeout_seconds': self.TURN_TIMEOUT_SECONDS
                 }
             }, to = p.sid)
+
+        # Start turn timer for human players
+        current_player = self.players[self.player_turn_index]
+        if not current_player.is_bot:
+            self.start_turn_timer()
 
         # Process bot turn if current player is a bot
         self._process_bot_turn()
@@ -535,6 +742,11 @@ class Game:
             return
         self.player_turn_index = next_index
 
+        # Start turn timer for the next player (if human)
+        next_player = self.players[next_index]
+        if not next_player.is_bot:
+            self.start_turn_timer()
+
         self.emit('game_update', {
             'text': f"{current_player.username} bets {bet}",
             'json': {
@@ -544,7 +756,8 @@ class Game:
                 'player_turn_index': self.player_turn_index,
                 'players': [{'sid': p.sid, 'username': p.username, 'hand_count': p.hand_count, 'last_bet': p.last_bet, 'is_active': p.is_active} for p in self.players],
                 'deal_in_progress': self.deal_in_progress,
-                'game_finished': self.game_finished
+                'game_finished': self.game_finished,
+                'turn_timeout_seconds': self.TURN_TIMEOUT_SECONDS
             }
         })
 
@@ -680,6 +893,9 @@ class Game:
             self.deal()
         else:
             # There are human players - wait for them to be ready
+            # Start the ready phase timer
+            self.start_ready_timer()
+
             # Emit a waiting_for_ready event to notify clients
             self.emit('game_update', {
                 'text': 'Waiting for players to be ready...',
@@ -689,7 +905,8 @@ class Game:
                     'players': [{'sid': p.sid, 'username': p.username, 'hand_count': p.hand_count, 'last_bet': p.last_bet, 'is_active': p.is_active, 'ready_for_next_deal': p.ready_for_next_deal} for p in self.players],
                     'player_turn_index': self.player_turn_index,
                     'deal_in_progress': self.deal_in_progress,
-                    'game_finished': self.game_finished
+                    'game_finished': self.game_finished,
+                    'ready_timeout_seconds': self.READY_TIMEOUT_SECONDS
                 }
             })
 
