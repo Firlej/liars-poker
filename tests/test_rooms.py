@@ -142,6 +142,18 @@ def test_rejoin_same_room_changes_nothing(lobby):
     assert room.version == version and room.game.seat(b) is not None
 
 
+def test_room_codes_are_six_unambiguous_characters_and_join_forgives_typing(lobby):
+    host = join(lobby, "Ada")
+    room = lobby.create_room(host, 0)
+    assert len(room.id) == 6 and set(room.id) <= set(R.ROOM_CODE_ALPHABET)
+    assert not set("ILO01") & set(R.ROOM_CODE_ALPHABET)
+    bob = join(lobby, "Bob")
+    typed = f" {room.id[:3].lower()}-{room.id[3:]} "
+    assert lobby.join_room(bob, typed, 0) is room
+    with pytest.raises(LobbyError):
+        lobby.join_room(join(lobby, "Cy"), "", 0)
+
+
 def test_one_room_at_a_time(lobby):
     room1, (a, b) = table(lobby, "Ada", "Bob", start=False)
     room2 = lobby.create_room(b, 0)

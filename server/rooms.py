@@ -12,6 +12,7 @@ and server restarts. Socket ids never leave the server layer.
 from __future__ import annotations
 
 import random
+import re
 import secrets
 import string
 from collections import OrderedDict
@@ -40,7 +41,9 @@ SNAPSHOT_LOG = 60
 NAME_LIMIT = 20
 MOVE_MEMORY = 32
 
+#: Room codes are typed by hand, so the alphabet leaves out look-alikes (I, L, O, 0, 1).
 ROOM_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+ROOM_CODE_LENGTH = 6
 
 
 def clean_name(raw: object) -> str:
@@ -161,7 +164,7 @@ class Lobby:
 
     def _new_room_id(self) -> str:
         while True:
-            code = "".join(self.rng.choice(ROOM_CODE_ALPHABET) for _ in range(5))
+            code = "".join(self.rng.choice(ROOM_CODE_ALPHABET) for _ in range(ROOM_CODE_LENGTH))
             if code not in self.rooms:
                 return code
 
@@ -206,7 +209,9 @@ class Lobby:
 
     def join_room(self, pid: str, room_id: object, now: float) -> Room:
         profile = self._profile(pid)
-        room = self.rooms.get(room_id) if isinstance(room_id, str) else None
+        # A typed code may carry spaces, dashes or lower case letters.
+        code = re.sub(r"[^A-Za-z0-9]", "", room_id).upper() if isinstance(room_id, str) else None
+        room = self.rooms.get(code) if code else None
         if room is None:
             raise LobbyError("room_not_found")
         if pid in room.members:
