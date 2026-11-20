@@ -1,6 +1,8 @@
 from flask import Flask, render_template, request, session
 from flask_socketio import SocketIO, emit, join_room, leave_room, close_room, rooms
 import logging
+import time
+import gevent
 
 from Game import Game
 
@@ -8,6 +10,15 @@ from Game import Game
 
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*")
+
+# Heartbeat tracking
+HEARTBEAT_TIMEOUT_SECONDS = 30  # Consider player disconnected if no heartbeat for this long
+HEARTBEAT_CHECK_INTERVAL = 5  # How often to check for stale heartbeats
+player_last_heartbeat = {}  # sid -> timestamp
+
+# Reconnection debounce tracking
+RECONNECTION_DEBOUNCE_SECONDS = 5  # Treat reconnects within this window as same session
+recent_disconnects = {}  # username -> (timestamp, room_id)
 
 
 @app.route("/")
@@ -33,8 +44,10 @@ def get_room_name():
 def connect():
     try:
         users.add(request.sid)
+        # Start heartbeat tracking for new connection
+        player_last_heartbeat[request.sid] = time.time()
         print("connect", request.sid[-4:])
-        emit("connected", {'sid': request.sid}, sid=request.sid)
+        emit("connected", {'sid': request.sid, 'heartbeat_interval': HEARTBEAT_TIMEOUT_SECONDS // 2}, sid=request.sid)
     except Exception as e:
         print(f"Connection error for {request.sid[-4:]}: {e}")
 
@@ -66,7 +79,7 @@ def start_game():
         join_room(room = room, sid = sid)
         queue = [item for item in queue if item[0] != sid]
 
-    game = Game(sids = sids, room = room, usernames = usernames)
+    game = Game(sids = sids, room = room, usernames = usernames, socketio=socketio)
     game.deal()
 
     games[room] = game
@@ -207,6 +220,27 @@ def join_manual_room(data):
             print(f"Creator {username} reconnected to room {room_id} - updated sid from {old_sid[-4:]} to {request.sid[-4:]}")
         else:
             print(f"{username} reconnected to room {room_id} - updated sid from {old_sid[-4:]} to {request.sid[-4:]}")
+
+        # If game has started, also update the player's SID in the Game instance
+        if game_started and room_id in games:
+            game = games[room_id]
+            reconnected_player = game.reconnect_player(username, request.sid)
+            if reconnected_player:
+                print(f"[RECONNECT] Player {username} reconnected to active game in {room_id}")
+
+                # Start heartbeat tracking for reconnected player
+                player_last_heartbeat[request.sid] = time.time()
+
+                # Notify other players
+                socketio.emit("game_update", {
+                    'text': f"{username} reconnected!",
+                    'json': {
+                        'action': 'player_reconnected',
+                        'reconnected_player_sid': request.sid,
+                        'reconnected_player_username': username,
+                        'players': [{'sid': p.sid, 'username': p.username, 'hand_count': p.hand_count, 'last_bet': p.last_bet, 'is_active': p.is_active} for p in game.players]
+                    }
+                }, room=room_id)
     elif existing_spectator_by_username is not None:
         # Spectator reconnected with new sid
         old_sid = room_data['spectators'][existing_spectator_by_username][0]
@@ -246,16 +280,12 @@ def join_manual_room(data):
         'gameStarted': game_started
     }
 
-    # If game has started and user is spectating, send current game state
-    if game_started and is_spectator and room_id in games:
+    # If game has started, send current game state (for spectators and reconnected players)
+    if game_started and room_id in games:
         game = games[room_id]
-        joined_room_data['currentGameState'] = {
-            'player_turn_index': game.player_turn_index,
-            'last_bet': game.last_bet,
-            'players': [{'sid': p.sid, 'username': p.username, 'hand_count': p.hand_count, 'last_bet': p.last_bet, 'is_active': p.is_active} for p in game.players],
-            'deal_in_progress': game.deal_in_progress,
-            'game_finished': game.game_finished
-        }
+        game_state = game.get_game_state(for_sid=request.sid)
+        joined_room_data['currentGameState'] = game_state
+        joined_room_data['isReconnecting'] = existing_player_by_username is not None
 
     emit("joined_room", joined_room_data, sid=request.sid)
 
@@ -435,7 +465,7 @@ def start_manual_room_game(data):
     print(f"Starting game in room {room_id} with {len(sids)} players ({sum(bot_flags)} bots)")
 
     # Create and start the game
-    game = Game(sids=sids, room=room_id, usernames=usernames, bot_flags=bot_flags)
+    game = Game(sids=sids, room=room_id, usernames=usernames, bot_flags=bot_flags, socketio=socketio)
     game.deal()
     games[room_id] = game
 
@@ -450,15 +480,34 @@ def start_manual_room_game(data):
 def bet(data):
     print("bet", request.sid[-4:], data)
 
+    # Extract move_id for acknowledgment (if provided)
+    move_id = data.get('move_id')
+
     game: Game = next(filter(lambda g: request.sid in g.sids, games.values()), None)
 
     if game is None:
         emit("message", {'text': "youre not in game. join a game to make a bet"}, sid=request.sid)
+        # Send move acknowledgment with failure
+        if move_id:
+            emit("move_ack", {'move_id': move_id, 'success': False, 'error': 'not_in_game'}, sid=request.sid)
         return
 
     assert "bet" in data.keys()
 
+    # Store state before move to detect success
+    was_their_turn = (game.player_turn_index < len(game.players) and
+                      game.players[game.player_turn_index].sid == request.sid)
+
     game.make_move(request.sid, data["bet"])
+
+    # Send move acknowledgment
+    if move_id:
+        # If it was their turn before, the move was likely processed
+        emit("move_ack", {
+            'move_id': move_id,
+            'success': was_their_turn,
+            'bet': data["bet"]
+        }, sid=request.sid)
 
     if game.game_finished:
         close_room(game.room)
@@ -468,8 +517,40 @@ def bet(data):
             del manual_rooms[game.room]
             socketio.emit("rooms_update", {'rooms': get_rooms_list()})
 
-    if not game.deal_in_progress:
-        game.deal()
+@socketio.on("ready_for_next_deal")
+def ready_for_next_deal():
+    print("ready_for_next_deal", request.sid[-4:])
+
+    game: Game = next(filter(lambda g: request.sid in g.sids, games.values()), None)
+
+    if game is None:
+        emit("message", {'text': "youre not in game"}, sid=request.sid)
+        return
+
+    game.mark_player_ready(request.sid)
+
+@socketio.on("request_game_state")
+def request_game_state():
+    """Allow clients to request the current game state for resync."""
+    print("request_game_state", request.sid[-4:])
+
+    game: Game = next(filter(lambda g: request.sid in g.sids, games.values()), None)
+
+    if game is None:
+        emit("game_state_response", {
+            'success': False,
+            'error': 'not_in_game',
+            'message': "You're not in a game"
+        }, sid=request.sid)
+        return
+
+    # Get current game state for this player
+    state = game.get_game_state(for_sid=request.sid)
+
+    emit("game_state_response", {
+        'success': True,
+        'state': state
+    }, sid=request.sid)
 
 @socketio.on("leave_game")
 def leave_game():
@@ -664,7 +745,15 @@ def disconnect(data=None):
     users.discard(request.sid)  # Use discard to avoid KeyError if not present
     queue = [item for item in queue if item[0] != request.sid]
 
+    # Clean up heartbeat tracking
+    if request.sid in player_last_heartbeat:
+        del player_last_heartbeat[request.sid]
+
     print(f"User {request.sid[-4:]} disconnected")
+
+    # Track disconnection for debouncing reconnections
+    disconnected_username = None
+    disconnected_room_id = None
 
     # Check if user is in a manual room
     # Note: We don't immediately remove them - they might reconnect (page reload)
@@ -672,6 +761,8 @@ def disconnect(data=None):
     for room_id, room_data in list(manual_rooms.items()):
         for i, (sid, username) in enumerate(room_data['players']):
             if sid == request.sid:
+                disconnected_username = username
+                disconnected_room_id = room_id
                 print(f"User {username} ({request.sid[-4:]}) disconnected from room {room_id} - keeping in room for potential reconnection")
                 # Don't remove them yet - let them reconnect with same username
                 break
@@ -729,10 +820,114 @@ def disconnect(data=None):
                 close_room(game.room)
                 del games[game.room]
 
+    # Track disconnection for debouncing reconnections
+    if disconnected_username and disconnected_room_id:
+        recent_disconnects[disconnected_username] = (time.time(), disconnected_room_id)
+
     print("disconnect", request.sid[-4:])
+
+
+@socketio.on("heartbeat")
+def handle_heartbeat():
+    """Handle client heartbeat to detect stale connections."""
+    player_last_heartbeat[request.sid] = time.time()
+    emit("heartbeat_ack", {'timestamp': time.time()}, sid=request.sid)
+
+
+def check_timeouts_and_heartbeats():
+    """Background task to check for turn timeouts, ready timeouts, and stale heartbeats."""
+    while True:
+        try:
+            current_time = time.time()
+
+            # Check for stale heartbeats
+            stale_sids = []
+            for sid, last_heartbeat in list(player_last_heartbeat.items()):
+                if (current_time - last_heartbeat) > HEARTBEAT_TIMEOUT_SECONDS:
+                    stale_sids.append(sid)
+
+            # Mark stale players as inactive
+            for sid in stale_sids:
+                print(f"[HEARTBEAT] Stale connection detected for {sid[-4:]}")
+                del player_last_heartbeat[sid]
+
+                # Find the game this player is in and mark them inactive
+                game = next((g for g in games.values() if sid in g.sids), None)
+                if game and not game.game_finished:
+                    player = game.mark_player_inactive(sid)
+                    if player:
+                        print(f"[HEARTBEAT] Marking {player.username} as inactive due to stale heartbeat")
+                        socketio.emit("game_update", {
+                            'text': f"{player.username} connection lost (no heartbeat).",
+                            'json': {
+                                'action': 'player_disconnected',
+                                'disconnected_player_sid': sid,
+                                'reason': 'heartbeat_timeout',
+                                'players': [{'sid': p.sid, 'username': p.username, 'hand_count': p.hand_count, 'is_active': p.is_active} for p in game.players]
+                            }
+                        }, room=game.room)
+
+                        # If it was their turn, handle the situation
+                        if game.deal_in_progress and game.players[game.player_turn_index].sid == sid:
+                            # The turn timeout will handle advancing the turn
+                            pass
+
+            # Check turn timeouts and ready timeouts for all games
+            for room_id, game in list(games.items()):
+                if game.game_finished:
+                    continue
+
+                # Check turn timeout
+                if game.check_turn_timeout():
+                    print(f"[TIMEOUT] Turn timeout detected in room {room_id}")
+                    game.handle_turn_timeout()
+
+                    # Clean up if game ended
+                    if game.game_finished:
+                        # Note: close_room requires request context, skip it from background task
+                        del games[room_id]
+                        if room_id in manual_rooms:
+                            del manual_rooms[room_id]
+                            socketio.emit("rooms_update", {'rooms': get_rooms_list()})
+                        continue
+
+                # Check ready timeout
+                if game.check_ready_timeout():
+                    print(f"[TIMEOUT] Ready timeout detected in room {room_id}")
+                    game.handle_ready_timeout()
+
+                    # Clean up if game ended
+                    if game.game_finished:
+                        # Note: close_room requires request context, skip it from background task
+                        del games[room_id]
+                        if room_id in manual_rooms:
+                            del manual_rooms[room_id]
+                            socketio.emit("rooms_update", {'rooms': get_rooms_list()})
+
+            # Clean up old disconnect records
+            for username in list(recent_disconnects.keys()):
+                disconnect_time, _ = recent_disconnects[username]
+                if (current_time - disconnect_time) > RECONNECTION_DEBOUNCE_SECONDS * 2:
+                    del recent_disconnects[username]
+
+        except Exception as e:
+            print(f"[TIMEOUT_CHECKER] Error in background task: {e}")
+
+        # Sleep for the check interval
+        gevent.sleep(HEARTBEAT_CHECK_INTERVAL)
+
+
+def start_background_tasks():
+    """Start all background tasks."""
+    gevent.spawn(check_timeouts_and_heartbeats)
+    print("[STARTUP] Background timeout checker started")
 
 
 if __name__ == "__main__":
     import os
     port = int(os.environ.get("PORT", 4000))
+
+    # Start background tasks
+    start_background_tasks()
+
     socketio.run(app = app, host='0.0.0.0', port=port, debug=False)

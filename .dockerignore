@@ -1,0 +1,7 @@
+venv
+.venv
+legacy
+data
+**/__pycache__
+*.ipynb
+*.pickle
