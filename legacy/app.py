@@ -517,9 +517,6 @@ def bet(data):
             del manual_rooms[game.room]
             socketio.emit("rooms_update", {'rooms': get_rooms_list()})
 
-    if not game.deal_in_progress:
-        game.deal()
-
 @socketio.on("ready_for_next_deal")
 def ready_for_next_deal():
     print("ready_for_next_deal", request.sid[-4:])
