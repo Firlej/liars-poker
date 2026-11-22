@@ -344,3 +344,47 @@ def test_persistence_round_trip_pauses_clock(lobby):
     assert not fresh.is_connected(a)
     assert fresh.hello(lobby.profiles[a].token, "Ada", 1000).id == a
     assert fresh.profiles[a].room_id == room.id
+
+
+def test_host_chooses_the_hand_limit(lobby):
+    room, (a, b) = table(lobby, "Ada", "Bob", start=False)
+    snap = lobby.snapshot(room, b, 0)["room"]
+    assert snap["max_hand"] == 6
+    assert snap["hand_limit"] == {"choice": None, "value": 6, "auto": 6, "max": 12, "max_choice": 12}
+    with pytest.raises(LobbyError, match="not_host"):
+        lobby.set_max_hand(b, 4, 0)
+    for bad in [0, 13, "5", True, 2.5]:
+        with pytest.raises(LobbyError, match="bad_max_hand"):
+            lobby.set_max_hand(a, bad, 0)
+    lobby.set_max_hand(a, 10, 1)
+    assert lobby.snapshot(room, b, 1)["room"]["hand_limit"]["value"] == 10
+    assert room.log[-1]["type"] == "max_hand_changed"
+
+    # A third player only fits 8 each; the choice is kept for when they leave.
+    c = join(lobby, "Cy")
+    lobby.join_room(c, room.id, 2)
+    limit = lobby.snapshot(room, a, 2)["room"]["hand_limit"]
+    assert limit["choice"] == 10 and limit["value"] == 8 and limit["auto"] == 4
+    lobby.start_game(a, 3)
+    assert room.game.settings.max_hand == 8 and room.settings.max_hand == 10
+    assert lobby.snapshot(room, a, 3)["room"]["max_hand"] == 8
+    with pytest.raises(LobbyError, match="game_in_progress"):
+        lobby.set_max_hand(a, None, 4)
+
+
+def test_hand_limit_back_to_auto_and_saved(lobby):
+    room, (a, b) = table(lobby, "Ada", "Bob", start=False)
+    lobby.set_max_hand(a, 2, 0)
+    restored = Lobby().room_from_dict(lobby.room_to_dict(room, 1), 1)
+    assert restored.settings.max_hand == 2
+    lobby.set_max_hand(a, None, 1)
+    lobby.start_game(a, 2)
+    assert room.game.settings.max_hand == 6
+
+
+def test_rooms_saved_before_hand_limits_play_auto(lobby):
+    room, _ = table(lobby, "Ada", "Bob", start=False)
+    d = lobby.room_to_dict(room, 1)
+    d.pop("max_hand_choice")
+    d["settings"]["max_hand"] = 3
+    assert Lobby().room_from_dict(d, 1).settings.max_hand is None

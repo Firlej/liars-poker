@@ -22,11 +22,36 @@ Card = str
 
 DECK: List[Card] = [rank + suit for rank in RANKS for suit in SUITS]
 
-#: A player is eliminated when they would have to hold more than this.
+#: A player is eliminated when they would have to hold more than their table's
+#: hand limit. With "auto" the limit follows the number of players: a table
+#: where everyone is one loss from out holds about AUTO_POOL cards, but never
+#: fewer than MAX_HAND each, so small tables play longer games.
 MAX_HAND = 3
+AUTO_POOL = 12
 
 #: Every seated player can hold MAX_HAND cards without running out of deck.
 MAX_PLAYERS = len(DECK) // MAX_HAND
+
+
+def deck_hand_limit(players: int) -> int:
+    """The most cards each of ``players`` can hold before the deck runs out."""
+    return len(DECK) // max(2, players)
+
+
+def auto_hand_limit(players: int) -> int:
+    return min(deck_hand_limit(players), max(MAX_HAND, AUTO_POOL // max(2, players)))
+
+
+def hand_limit(players: int, chosen: "int | None" = None) -> int:
+    """The hand limit a game of ``players`` is played with: the host's choice
+    (None means auto), lowered if the deck cannot deal that many to everyone."""
+    if chosen is None:
+        return auto_hand_limit(players)
+    return max(1, min(chosen, deck_hand_limit(players)))
+
+
+#: The largest limit a host may choose (it only fits two players).
+MAX_HAND_CHOICE = deck_hand_limit(2)
 
 
 def _rank_pairs_any() -> List[tuple]:

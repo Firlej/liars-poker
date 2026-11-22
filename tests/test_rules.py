@@ -16,6 +16,17 @@ def test_deck_and_limits():
     assert len(rules.DECK) == 24 and len(set(rules.DECK)) == 24
     assert rules.MAX_PLAYERS == 8
     assert len(BETS) == 83 and len(set(BETS)) == 83
+    assert rules.MAX_HAND_CHOICE == 12
+
+
+def test_hand_limits_always_fit_the_deck():
+    for n in range(2, rules.MAX_PLAYERS + 1):
+        assert n * rules.auto_hand_limit(n) <= len(rules.DECK)
+        for chosen in [None, *range(1, rules.MAX_HAND_CHOICE + 1)]:
+            limit = rules.hand_limit(n, chosen)
+            assert 1 <= limit and n * limit <= len(rules.DECK)
+            if chosen is not None:
+                assert limit == min(chosen, len(rules.DECK) // n)
 
 
 def test_bet_order_matches_legacy_engine():

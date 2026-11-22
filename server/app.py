@@ -294,6 +294,10 @@ class GameServer:
             self.lobby.kick(pid, data.get("player_id"), now)
             return ok()
 
+        def set_max_hand(sid, pid, data, now):
+            self.lobby.set_max_hand(pid, data.get("max_hand"), now)
+            return ok()
+
         def ping(sid, pid, data, now):
             return ok(t=data.get("t"), server_time=int(now * 1000))
 
@@ -301,6 +305,7 @@ class GameServer:
             "rooms": rooms, "unwatch_rooms": unwatch_rooms, "set_name": set_name,
             "create_room": create_room, "join_room": join_room, "leave_room": leave_room,
             "sync": sync, "act": act, "kick": kick, "ping": ping, "watch_bots": watch_bots,
+            "set_max_hand": set_max_hand,
             "start_game": simple(self.lobby.start_game), "add_bot": simple(self.lobby.add_bot),
             "shuffle_seats": simple(self.lobby.shuffle_seats),
             "sit": simple(self.lobby.sit), "stand": simple(self.lobby.stand),

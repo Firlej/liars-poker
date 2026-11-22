@@ -13,7 +13,7 @@ Phases:
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional
 
 from . import rules
@@ -33,7 +33,9 @@ class GameError(Exception):
 class Settings:
     turn_seconds: float = 60.0
     reveal_seconds: float = 20.0
-    max_hand: int = rules.MAX_HAND
+    #: Most cards a player may hold; one more puts them out. None means "auto"
+    #: (see rules.hand_limit). A running game always holds a resolved number.
+    max_hand: Optional[int] = None
 
     def to_dict(self) -> dict:
         return {"turn_seconds": self.turn_seconds, "reveal_seconds": self.reveal_seconds, "max_hand": self.max_hand}
@@ -73,7 +75,9 @@ class Game:
         if len(set(player_ids)) != len(player_ids):
             raise GameError("duplicate_players")
         self.rng = rng or random.Random()
-        self.settings = settings or Settings()
+        # A copy, so the room's choice ("auto") is kept for the next game.
+        base = settings or Settings()
+        self.settings = replace(base, max_hand=rules.hand_limit(len(player_ids), base.max_hand))
         self.seats: List[Seat] = [Seat(pid) for pid in player_ids]
         self.phase = BETTING
         self.deal_no = 0
@@ -341,6 +345,8 @@ class Game:
         game.rng = rng or random.Random()
         game.settings = Settings.from_dict(d.get("settings", {}))
         game.seats = [Seat.from_dict(s) for s in d["seats"]]
+        if game.settings.max_hand is None:
+            game.settings.max_hand = rules.hand_limit(len(game.seats))
         game.phase, game.deal_no, game.turn_seq = d["phase"], d["deal_no"], d["turn_seq"]
         game.turn, game.starter, game.bets = d["turn"], d["starter"], list(d["bets"])
         game.deadline, game.turn_started_at = d["deadline"], d["turn_started_at"]
