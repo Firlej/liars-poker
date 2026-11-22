@@ -12,6 +12,7 @@ and server restarts. Socket ids never leave the server layer.
 from __future__ import annotations
 
 import random
+import re
 import secrets
 import string
 from collections import OrderedDict
@@ -40,7 +41,9 @@ SNAPSHOT_LOG = 60
 NAME_LIMIT = 20
 MOVE_MEMORY = 32
 
+#: Room codes are typed by hand, so the alphabet leaves out look-alikes (I, L, O, 0, 1).
 ROOM_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+ROOM_CODE_LENGTH = 6
 
 
 def clean_name(raw: object) -> str:
@@ -161,7 +164,7 @@ class Lobby:
 
     def _new_room_id(self) -> str:
         while True:
-            code = "".join(self.rng.choice(ROOM_CODE_ALPHABET) for _ in range(5))
+            code = "".join(self.rng.choice(ROOM_CODE_ALPHABET) for _ in range(ROOM_CODE_LENGTH))
             if code not in self.rooms:
                 return code
 
@@ -206,7 +209,9 @@ class Lobby:
 
     def join_room(self, pid: str, room_id: object, now: float) -> Room:
         profile = self._profile(pid)
-        room = self.rooms.get(room_id) if isinstance(room_id, str) else None
+        # A typed code may carry spaces, dashes or lower case letters.
+        code = re.sub(r"[^A-Za-z0-9]", "", room_id).upper() if isinstance(room_id, str) else None
+        room = self.rooms.get(code) if code else None
         if room is None:
             raise LobbyError("room_not_found")
         if pid in room.members:
@@ -324,6 +329,22 @@ class Lobby:
         self.rng.shuffle(room.seats)
         room.touch()
 
+    def set_max_hand(self, pid: str, value: object, now: float) -> None:
+        """Choose how many cards a player may hold before they are out, or None
+        for auto. Kept as chosen; a game lowers it if its table cannot fit it."""
+        room = self._room_of(pid)
+        self._require_host(room, pid)
+        self._require_not_playing(room)
+        if value is not None and (not isinstance(value, int) or isinstance(value, bool)
+                                  or not 1 <= value <= rules.MAX_HAND_CHOICE):
+            raise LobbyError("bad_max_hand")
+        if room.settings.max_hand == value:
+            return
+        room.settings.max_hand = value
+        self._log(room, now, "max_hand_changed", pid, max_hand=value,
+                  effective=rules.hand_limit(len(room.seats), value))
+        room.touch()
+
     def sit(self, pid: str, now: float) -> None:
         room = self._room_of(pid)
         self._require_not_playing(room)
@@ -362,7 +383,7 @@ class Lobby:
         room.game = Game(seats, now, rng=random.Random(self.rng.random()), settings=room.settings, start=False)
         room.games_played += 1
         room.moves = {}
-        self._log(room, now, "game_start", None, players=list(seats))
+        self._log(room, now, "game_start", None, players=list(seats), max_hand=room.game.settings.max_hand)
         room.game._start_deal(now)
         self._drain(room, now)
         room.touch()
@@ -588,11 +609,22 @@ class Lobby:
             })
         spectators = [{"id": m.id, "name": m.name, "connected": self.is_connected(m.id)}
                       for m in room.members.values() if m.role == "spectator"]
+        seated = len(room.seats)
+        next_limit = {
+            "choice": room.settings.max_hand,  # None = auto
+            "value": rules.hand_limit(seated, room.settings.max_hand),
+            "auto": rules.auto_hand_limit(seated),
+            "max": rules.deck_hand_limit(seated),
+            "max_choice": rules.MAX_HAND_CHOICE,
+        }
         snap = {
             "v": room.version,
             "server_time": int(now * 1000),
             "room": {"id": room.id, "name": room.name, "host_id": room.host_id, "status": room.status,
-                     "max_players": rules.MAX_PLAYERS, "max_hand": room.settings.max_hand,
+                     "max_players": rules.MAX_PLAYERS,
+                     # The limit of the game on screen, or of the next one in the lobby.
+                     "max_hand": game.settings.max_hand if game else next_limit["value"],
+                     "hand_limit": next_limit,
                      "games_played": room.games_played, "autoplay": room.autoplay},
             "me": {"id": viewer, "role": me.role if me else "spectator", "is_host": room.host_id == viewer},
             "players": players,
@@ -634,6 +666,8 @@ class Lobby:
             "saved_at": now,
             "id": room.id, "name": room.name, "host_id": room.host_id, "created_at": room.created_at,
             "settings": room.settings.to_dict(),
+            # Kept apart from "settings": rooms saved before hosts could choose hold 3 there.
+            "max_hand_choice": room.settings.max_hand,
             "members": [vars(m) for m in room.members.values()],
             "seats": room.seats, "game": room.game.to_dict() if room.game else None,
             "names": room.names, "bot_ids": sorted(room.bot_ids), "log": room.log, "log_seq": room.log_seq,
@@ -643,6 +677,7 @@ class Lobby:
     def room_from_dict(self, d: dict, now: float) -> Room:
         room = Room(id=d["id"], name=d["name"], host_id=d["host_id"], created_at=d["created_at"],
                     settings=Settings.from_dict(d.get("settings", {})))
+        room.settings.max_hand = d.get("max_hand_choice")
         room.members = OrderedDict((m["id"], Member(**m)) for m in d["members"])
         room.seats = list(d["seats"])
         room.names = dict(d["names"])

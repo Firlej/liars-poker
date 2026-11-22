@@ -109,9 +109,17 @@ async def test_full_flow_reconnect_and_restart(tmp_path):
         joined = await bob.call("join_room", {"room_id": room_id})
         assert joined["ok"] and len(joined["state"]["players"]) == 2
 
+        assert (await bob.call("set_max_hand", {"max_hand": 5}))["error"] == "not_host"
+        assert (await ada.call("set_max_hand", {"max_hand": 99}))["error"] == "bad_max_hand"
+        assert (await ada.call("set_max_hand", {"max_hand": 5}))["ok"]
+        await bob.until(lambda s: s["room"]["hand_limit"]["choice"] == 5)
+        assert (await ada.call("set_max_hand", {"max_hand": None}))["ok"]
+        await bob.until(lambda s: s["room"]["hand_limit"]["choice"] is None)
+
         assert (await bob.call("start_game"))["error"] == "not_host"
         assert (await ada.call("start_game"))["ok"]
         state = await ada.until(lambda s: s["game"] and s["game"]["phase"] == "betting")
+        assert state["room"]["max_hand"] == 6
         assert len(state["game"]["my_hand"]) == 1
 
         turn = state["game"]["turn_id"]
@@ -158,7 +166,7 @@ async def test_bad_input_never_crashes(tmp_path):
         eve = await Player("Eve").connect(srv.url)
         for event, payload in [("act", "nonsense"), ("act", {"type": "bet"}), ("join_room", {"room_id": 5}),
                                ("kick", {"player_id": None}), ("start_game", None), ("sync", {}),
-                               ("set_name", {"name": "\u0000" * 500})]:
+                               ("set_name", {"name": "\u0000" * 500}), ("set_max_hand", {"max_hand": "x"})]:
             result = await eve.call(event, payload)
             assert result["ok"] is False or event == "set_name"
         assert (await eve.call("ping", {"t": 1}))["ok"]

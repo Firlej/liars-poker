@@ -117,7 +117,7 @@ def test_last_player_standing_wins():
 
 
 def test_full_game_to_completion_with_max_hand_3():
-    g = make(3, seed=7)
+    g = make(3, seed=7, max_hand=3)
     rng = random.Random(3)
     now = 0.0
     for _ in range(500):
@@ -267,3 +267,37 @@ def test_events_describe_the_deal():
     types = [e["type"] for e in g.drain_events()]
     assert types == ["bet", "check", "deal_result"]
     assert g.drain_events() == []
+
+
+@pytest.mark.parametrize("n,limit", [(2, 6), (3, 4), (4, 3), (5, 3), (8, 3)])
+def test_auto_hand_limit_follows_the_table_size(n, limit):
+    assert make(n).settings.max_hand == limit
+
+
+def test_chosen_hand_limit_is_lowered_to_fit_the_deck():
+    assert make(2, max_hand=12).settings.max_hand == 12
+    assert make(3, max_hand=12).settings.max_hand == 8
+    assert make(4, max_hand=2).settings.max_hand == 2
+
+
+def test_two_players_at_twelve_cards_fit_the_deck():
+    g = make(2, max_hand=12)
+    for s in g.seats:
+        s.cards = 12
+    g._start_deal(1)
+    assert len(set(g.cards_in_play())) == 24
+    g.bet(g.current_id, "pair_9", 2)
+    g.check(g.current_id, 3)
+    assert g.phase == OVER
+
+
+def test_game_keeps_its_own_settings():
+    settings = Settings()
+    g = Game(["a", "b"], now=0, settings=settings)
+    assert g.settings.max_hand == 6 and settings.max_hand is None
+
+
+def test_restoring_a_game_saved_without_a_hand_limit():
+    d = make(4).to_dict()
+    d["settings"].pop("max_hand")
+    assert Game.from_dict(d).settings.max_hand == 3

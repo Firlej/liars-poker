@@ -57,7 +57,12 @@ Socket.IO clients over WebSocket and long-polling, including a server restart.
   poker). The first player of a deal must bet; anyone after may check instead.
 - On a check all hands are shown. If the bet holds, the checker loses the deal,
   otherwise the bettor does. The loser gets one more card and opens the next
-  deal. Needing a 4th card puts you out. The last player left wins.
+  deal. Going over the table's hand limit puts you out. The last player left
+  wins.
+- The hand limit is "auto" by default: 6 cards for 2 players, 4 for 3, and 3
+  for 4 or more (out on the 7th, 5th and 4th card). The host can pick any limit
+  from 1 to 12 in the lobby. A game lowers it if the 24-card deck cannot deal
+  that many to everyone (24 ÷ players).
 
 ## Protocol
 
@@ -68,8 +73,15 @@ with it, from any socket, is the same player in the same seat.
 Requests are emits with an acknowledgement, answered `{ok: true, ...}` or
 `{ok: false, error}`: `rooms`, `create_room`, `join_room {room_id}`,
 `leave_room`, `start_game`, `add_bot`, `shuffle_seats`, `sit`, `stand`,
-`kick {player_id}`, `act {type: bet|check|ready, bet, turn_seq, move_id}`,
-`sync`, `set_name {name}`, `ping {t}`.
+`kick {player_id}`, `set_max_hand {max_hand}` (host, lobby only; a number
+from 1 to 12 or `null` for auto), `act {type: bet|check|ready, bet, turn_seq,
+move_id}`, `sync`, `set_name {name}`, `ping {t}`.
+
+`state.room.max_hand` is the limit of the game on screen (or of the next game,
+in the lobby). `state.room.hand_limit` describes the next game:
+`{choice, value, auto, max, max_choice}`, where `choice` is the host's pick
+(`null` = auto), `value` is what the current seating would play with, and
+`max` is the most the deck allows for the current seating.
 
 Whenever a room changes, each member receives `state`: the full snapshot from
 their point of view with a version `v`. Other players' cards are only included
