@@ -168,8 +168,8 @@ def test_timeout_opening_bets_lowest_then_checks():
     assert g.current_id == "p1" and g.deadline == 120
     assert g.timeout(120) is True
     assert g.phase == REVEAL
-    assert g.timeout(120 + 19) is False
-    assert g.timeout(120 + 20) is True
+    assert g.timeout(120 + g.settings.reveal_seconds - 1) is False
+    assert g.timeout(120 + g.settings.reveal_seconds) is True
     assert g.phase == BETTING and g.deal_no == 2
 
 
