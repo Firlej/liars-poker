@@ -388,3 +388,27 @@ def test_rooms_saved_before_hand_limits_play_auto(lobby):
     d.pop("max_hand_choice")
     d["settings"]["max_hand"] = 3
     assert Lobby().room_from_dict(d, 1).settings.max_hand is None
+
+
+def test_reactions_reach_everyone_in_the_room(lobby):
+    room, (a, b) = table(lobby, "Ada", "Bob", start=False)
+    lobby.add_bot(a, 0)
+    lobby.notices.clear()
+    lobby.react(b, "thanks", 1.0)
+    sent = [(pid, event, payload["reaction"], payload["player_id"]) for pid, event, payload in lobby.notices]
+    assert sorted(sent) == sorted([(a, "reaction", "thanks", b), (b, "reaction", "thanks", b)])
+    # Reactions are not room state: nothing to persist or resend.
+    assert all(payload["room_id"] == room.id for _, _, payload in lobby.notices)
+
+
+def test_reactions_are_checked_and_slowed_down(lobby):
+    room, (a, b) = table(lobby, "Ada", "Bob", start=False)
+    with pytest.raises(LobbyError, match="bad_reaction"):
+        lobby.react(a, "<script>", 1.0)
+    lobby.react(a, "hurry", 1.0)
+    with pytest.raises(LobbyError, match="rate_limited"):
+        lobby.react(a, "laugh", 1.5)
+    lobby.react(a, "laugh", 2.1)
+    outsider = join(lobby, "Eve")
+    with pytest.raises(LobbyError, match="not_in_room"):
+        lobby.react(outsider, "thanks", 3.0)

@@ -32,7 +32,7 @@ class GameError(Exception):
 @dataclass
 class Settings:
     turn_seconds: float = 60.0
-    reveal_seconds: float = 20.0
+    reveal_seconds: float = 10.0
     #: Most cards a player may hold; one more puts them out. None means "auto"
     #: (see rules.hand_limit). A running game always holds a resolved number.
     max_hand: Optional[int] = None

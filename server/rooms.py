@@ -45,6 +45,16 @@ MOVE_MEMORY = 32
 ROOM_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 ROOM_CODE_LENGTH = 6
 
+#: Quick reactions anyone in a room can send: animated emoji and short phrases.
+#: The app owns how each one looks; the server only checks the id.
+REACTIONS = frozenset({
+    "thumbs", "laugh", "cry", "angry", "shock", "think", "cool", "clap",
+    "thanks", "good_game", "well_played", "hurry", "nice_bluff", "close",
+    "liar", "oops", "sorry", "again",
+})
+#: Seconds between two reactions from the same player.
+REACTION_COOLDOWN = 1.0
+
 
 def clean_name(raw: object) -> str:
     name = raw if isinstance(raw, str) else ""
@@ -127,6 +137,8 @@ class Lobby:
         self.problems: List[dict] = []
         #: Bumped whenever the public room list changes.
         self.list_version = 0
+        #: When each player last sent a reaction.
+        self.reacted_at: Dict[str, float] = {}
         self.dirty: set = set()
 
     # ----- identity ------------------------------------------------------
@@ -321,6 +333,19 @@ class Lobby:
         self._remove_member(room, target, now, "kicked")
         if not member.is_bot:
             self.notices.append((target, "kicked", {"room_id": room.id}))
+
+    def react(self, pid: str, reaction: object, now: float) -> None:
+        """Show a quick reaction to everyone in the room. Not part of the room state."""
+        room = self._room_of(pid)
+        if reaction not in REACTIONS:
+            raise LobbyError("bad_reaction")
+        if now - self.reacted_at.get(pid, float("-inf")) < REACTION_COOLDOWN:
+            raise LobbyError("rate_limited")
+        self.reacted_at[pid] = now
+        payload = {"room_id": room.id, "player_id": pid, "reaction": reaction, "ts": int(now * 1000)}
+        for member in room.members.values():
+            if not member.is_bot:
+                self.notices.append((member.id, "reaction", payload))
 
     def shuffle_seats(self, pid: str, now: float) -> None:
         room = self._room_of(pid)
