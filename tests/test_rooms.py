@@ -412,3 +412,17 @@ def test_reactions_are_checked_and_slowed_down(lobby):
     outsider = join(lobby, "Eve")
     with pytest.raises(LobbyError, match="not_in_room"):
         lobby.react(outsider, "thanks", 3.0)
+
+
+def test_new_rooms_get_fun_names_no_open_room_shares(lobby):
+    names = [lobby.create_room(join(lobby, f"P{i}"), 0).name for i in range(30)]
+    assert all(n.startswith("The ") for n in names)
+    assert len(set(names)) == len(names)
+
+
+def test_bots_get_fun_names_no_two_alike(lobby):
+    host = join(lobby, "Ada")
+    lobby.create_room(host, 0)
+    names = [lobby.add_bot(host, 0).name for _ in range(5)]
+    assert all(n in R.BOT_NAMES for n in names)
+    assert len(set(names)) == len(names)
