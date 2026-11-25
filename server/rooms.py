@@ -44,6 +44,29 @@ MOVE_MEMORY = 32
 #: Room codes are typed by hand, so the alphabet leaves out look-alikes (I, L, O, 0, 1).
 ROOM_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 ROOM_CODE_LENGTH = 6
+#: Bot names: fun, but still plainly robots, since the table shows no other bot mark.
+BOT_NAMES = (
+    "Bluffotron", "Robo Rex", "Beep Boop", "Ace-9000", "Tin Tony", "Sprocket",
+    "Glitchy", "Wobblebot", "R2-Deal", "Clanky", "Pixel", "Chip", "Gizmo",
+    "Bolt", "Nano", "Turbo", "Dr. Fibbs", "Bleep", "Rusty", "Byte", "Widget",
+    "Zappy", "Sparky", "Botley", "Robo Rita", "Fibbot", "Circuit", "Gadget",
+    "Dealbot", "Unit 7",
+)
+#: A new room is called "The <adjective> <character>", like an old pub.
+ROOM_NAME_ADJECTIVES = (
+    "Sneaky", "Shifty", "Crooked", "Sly", "Smug", "Fibbing", "Bluffing",
+    "Two-Faced", "Sweaty", "Nervous", "Lucky", "Shady", "Cheeky", "Wily",
+    "Slippery", "Stone-Faced", "Dodgy", "Grumpy", "Jolly", "Tipsy", "Sleepy",
+    "Cunning", "Brazen", "Fishy", "Wobbly", "Innocent", "Honest", "Devious",
+    "Suspicious", "Daring", "Mischievous", "Glum", "Fancy", "Rowdy",
+)
+ROOM_NAME_CHARACTERS = (
+    "Badger", "Fox", "Weasel", "Raccoon", "Ferret", "Llama", "Walrus", "Goose",
+    "Penguin", "Octopus", "Crow", "Magpie", "Possum", "Otter", "Toad", "Hyena",
+    "Lobster", "Pelican", "Moose", "Flamingo", "Ace", "Joker", "Jack", "Queen",
+    "King", "Card Shark", "Gambler", "Pirate", "Duchess", "Baron", "Cowboy",
+    "Magician", "Detective", "Grandma",
+)
 
 #: Quick reactions anyone in a room can send: animated emoji and short phrases.
 #: The app owns how each one looks; the server only checks the id.
@@ -183,6 +206,15 @@ class Lobby:
             if code not in self.rooms:
                 return code
 
+    def _new_room_name(self) -> str:
+        taken = {room.name for room in self.rooms.values()}
+        name = ""
+        for _ in range(20):  # a few tries for a name no open room is using
+            name = f"The {self.rng.choice(ROOM_NAME_ADJECTIVES)} {self.rng.choice(ROOM_NAME_CHARACTERS)}"
+            if name not in taken:
+                break
+        return name
+
     def _room_of(self, pid: str) -> Room:
         profile = self._profile(pid)
         room = self.rooms.get(profile.room_id or "")
@@ -216,7 +248,7 @@ class Lobby:
     def create_room(self, pid: str, now: float) -> Room:
         profile = self._profile(pid)
         self.leave(pid, now)
-        room = Room(id=self._new_room_id(), name=f"{profile.name}'s table", host_id=pid, created_at=now)
+        room = Room(id=self._new_room_id(), name=self._new_room_name(), host_id=pid, created_at=now)
         self.rooms[room.id] = room
         self._add_member(room, profile, now)
         self.list_version += 1
@@ -309,11 +341,16 @@ class Lobby:
         self._require_not_playing(room)
         if len(room.seats) >= rules.MAX_PLAYERS:
             raise LobbyError("room_full")
-        n = 1
         taken = {m.name for m in room.members.values()}
-        while f"Bot {n}" in taken:
-            n += 1
-        bot = Member(id="b_" + secrets.token_hex(6), name=f"Bot {n}", is_bot=True)
+        free = [name for name in BOT_NAMES if name not in taken]
+        if free:
+            name = self.rng.choice(free)
+        else:
+            n = 1
+            while f"Bot {n}" in taken:
+                n += 1
+            name = f"Bot {n}"
+        bot = Member(id="b_" + secrets.token_hex(6), name=name, is_bot=True)
         room.members[bot.id] = bot
         room.names[bot.id] = bot.name
         room.bot_ids.add(bot.id)
