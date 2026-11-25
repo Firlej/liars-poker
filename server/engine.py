@@ -290,6 +290,8 @@ class Game:
             return False
         self.phase = OVER
         self.deadline = None
+        # Clients time the final reveal from here, so it plays out like any other.
+        self.turn_started_at = now
         self.winner = alive[0].id if alive else None
         self._emit("game_won", player_id=self.winner)
         return True
