@@ -111,6 +111,8 @@ def test_last_player_standing_wins():
     g.bet("p0", "quad_A", 1)
     g.check("p1", 2)
     assert g.phase == OVER and g.winner == "p1" and g.deadline is None
+    # The final reveal is timed from the check, so clients play it out.
+    assert g.turn_started_at == 2
     with pytest.raises(GameError):
         g.bet("p1", "pair_9", 3)
     assert g.timeout(10_000) is False
