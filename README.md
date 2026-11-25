@@ -18,7 +18,11 @@ docker build -t liars-poker-server . && docker run -p 4000:4000 -v liars-poker-d
 ```
 
 Environment: `PORT`, `DB_PATH` (default `data/liars_poker.db`), `CORS_ORIGINS`
-(comma-separated, default `*`), `LOG_LEVEL`. `GET /health` returns `{"ok": true}`.
+(comma-separated, default `*`), `LOG_LEVEL`, `MIN_APP_VERSION` and
+`LATEST_APP_VERSION` (phone app versions like `1.3.0`, sent to the app on
+connect: older than min shows "Please update", older than latest shows a
+dismissable "Update available"; leave both empty to show nothing). Raise
+`MIN_APP_VERSION` only after that version is live in both stores. `GET /health` returns `{"ok": true}`.
 
 Run a single process: all live game state is in memory in that process (and
 persisted to `DB_PATH`). Behind a proxy, enable WebSocket upgrades and keep

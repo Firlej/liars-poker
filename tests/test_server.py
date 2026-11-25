@@ -19,12 +19,13 @@ def free_port():
 
 
 class Running:
-    def __init__(self, db):
+    def __init__(self, db, **options):
         self.db = db
+        self.options = options
         self.port = free_port()
 
     async def __aenter__(self):
-        self.game = GameServer(store=Store(self.db))
+        self.game = GameServer(store=Store(self.db), **self.options)
         config = uvicorn.Config(self.game.app, host="127.0.0.1", port=self.port, log_level="warning", lifespan="on",
                                 timeout_graceful_shutdown=1)
         self.server = uvicorn.Server(config)
@@ -55,6 +56,7 @@ class Player:
         @self.sio.on("welcome")
         def on_welcome(data):
             self.id, self.token = data["player_id"], data["token"]
+            self.welcome_data = data
             self.welcome.set()
 
         @self.sio.on("state")
@@ -227,3 +229,14 @@ def test_reporter_dedupes_and_limits(monkeypatch):
         r.report("x", f"different {i}")
     assert len(sent) == reporting.MAX_PER_HOUR
     assert reporting.Reporter(None).report("x", "y") is False
+
+
+async def test_welcome_carries_app_versions(tmp_path):
+    async with Running(str(tmp_path / "a.db"), app_versions={"min": "1.3.0", "latest": "1.4.0"}) as srv:
+        ada = await Player("Ada").connect(srv.url)
+        assert ada.welcome_data["app_versions"] == {"min": "1.3.0", "latest": "1.4.0"}
+        await ada.close()
+    async with Running(str(tmp_path / "b.db"), app_versions={"min": "", "latest": ""}) as srv:
+        bob = await Player("Bob").connect(srv.url)
+        assert bob.welcome_data["app_versions"] == {}
+        await bob.close()

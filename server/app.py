@@ -1,7 +1,8 @@
 """Socket.IO server: connects sockets to players and pushes snapshots.
 
 Protocol, in one paragraph: the client connects with ``auth={token, name}``
-and gets ``welcome`` with its ``player_id`` and (possibly new) ``token``.
+and gets ``welcome`` with its ``player_id``, (possibly new) ``token`` and the
+phone ``app_versions`` it supports.
 Every request is an emit with an acknowledgement callback that answers
 ``{ok: true, ...}`` or ``{ok: false, error: <code>}``. Whenever a room changes,
 every member's sockets receive ``state``: the full room snapshot from their
@@ -52,8 +53,13 @@ class Bucket:
 
 class GameServer:
     def __init__(self, store: Optional[Store] = None, clock: Callable[[], float] = time.time,
-                 cors: object = "*", lobby: Optional[Lobby] = None, reporter: Optional[Reporter] = None):
+                 cors: object = "*", lobby: Optional[Lobby] = None, reporter: Optional[Reporter] = None,
+                 app_versions: Optional[Dict[str, str]] = None):
         self.clock = clock
+        #: Phone app versions, sent in ``welcome``: ``min`` is the oldest the server
+        #: still works with (older apps show "Please update"), ``latest`` is the
+        #: newest in the stores (older apps show a dismissable "Update available").
+        self.app_versions = {k: v for k, v in (app_versions or {}).items() if v}
         self.reporter = reporter or Reporter(None)
         self.store = store
         self.lobby = lobby or Lobby()
@@ -199,7 +205,8 @@ class GameServer:
             self.buckets[sid] = Bucket(now)
             self.lobby.set_connected(profile.id, True, now)
             await sio.emit("welcome", {"player_id": profile.id, "token": profile.token, "name": profile.name,
-                                       "room_id": profile.room_id, "server_time": int(now * 1000)}, to=sid)
+                                       "room_id": profile.room_id, "server_time": int(now * 1000),
+                                       "app_versions": self.app_versions}, to=sid)
             room = self.lobby.rooms.get(profile.room_id or "")
             if room:
                 await self.push_room(room, force=True)
@@ -325,5 +332,7 @@ def create_app():
     db_path = os.environ.get("DB_PATH", os.path.join(os.path.dirname(__file__), "..", "data", "liars_poker.db"))
     report_url = os.environ.get("ERROR_REPORT_URL", DEFAULT_URL).strip() or None
     server = GameServer(store=Store(db_path), cors=cors,
-                        reporter=Reporter(report_url, version=os.environ.get("APP_VERSION", "server")))
+                        reporter=Reporter(report_url, version=os.environ.get("APP_VERSION", "server")),
+                        app_versions={"min": os.environ.get("MIN_APP_VERSION", "").strip(),
+                                      "latest": os.environ.get("LATEST_APP_VERSION", "").strip()})
     return server.app
