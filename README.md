@@ -24,6 +24,25 @@ Run a single process: all live game state is in memory in that process (and
 persisted to `DB_PATH`). Behind a proxy, enable WebSocket upgrades and keep
 idle timeouts above 60 s.
 
+## Deploy (production VPS)
+
+Production runs on the mikr.us VPS as the systemd unit `liars-poker.service`, from a git checkout
+of `mobile-app-integration` in `/var/www/liars-poker`. nginx serves `liarspoker-server.adamtomczyk.com`
+(behind Cloudflare) and proxies everything, WebSockets included, to `127.0.0.1:4000`.
+
+```bash
+scp -P 10173 deploy/deploy-vps.sh root@patryk173.mikrus.xyz:/root/deploy-liars-poker.sh
+ssh -p 10173 root@patryk173.mikrus.xyz 'bash /root/deploy-liars-poker.sh'
+```
+
+The script saves the running commit and unit file to `/root/backups`, pulls the branch, installs
+dependencies, runs the tests, writes the unit (uvicorn, one process, `DB_PATH` in `data/`), restarts it
+and checks `/health`. It prints the exact rollback command at the end. Games in progress survive the
+restart; players see "Reconnecting" for a few seconds.
+
+Error reports go to the PocketBase `feedbacks` collection by default; set `ERROR_REPORT_URL=` in the
+unit to turn them off.
+
 ## Tests
 
 ```bash
