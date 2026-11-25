@@ -51,6 +51,9 @@ REACTIONS = frozenset({
     "thumbs", "laugh", "cry", "angry", "shock", "think", "cool", "clap",
     "thanks", "good_game", "well_played", "hurry", "nice_bluff", "close",
     "liar", "oops", "sorry", "again",
+    "lying", "poker_face", "smirk", "wink", "shush", "eyes", "sweat", "facepalm",
+    "mind_blown", "skull", "clown", "devil", "fire", "party", "crown", "sleepy",
+    "tongue", "loser",
 })
 #: Seconds between two reactions from the same player.
 REACTION_COOLDOWN = 1.0
