@@ -79,7 +79,11 @@ Requests are emits with an acknowledgement, answered `{ok: true, ...}` or
 `leave_room`, `start_game`, `add_bot`, `shuffle_seats`, `sit`, `stand`,
 `kick {player_id}`, `set_max_hand {max_hand}` (host, lobby only; a number
 from 1 to 12 or `null` for auto), `act {type: bet|check|ready, bet, turn_seq,
-move_id}`, `sync`, `set_name {name}`, `ping {t}`.
+move_id}`, `sync`, `set_name {name}` (an offensive name answers
+`name_not_allowed`, see `server/names.py`), `ping {t}`, `report_player
+{player_id, reason, note?}` (someone who sat in your room; `reason` is
+`offensive_name`, `abusive_reactions`, `cheating` or `other`; saved to the
+`reports` table, `already_reported` within 10 minutes).
 
 `state.room.max_hand` is the limit of the game on screen (or of the next game,
 in the lobby). `state.room.hand_limit` describes the next game:

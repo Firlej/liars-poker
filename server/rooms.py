@@ -85,6 +85,12 @@ REACTIONS = frozenset({
 })
 #: Seconds between two reactions from the same player.
 REACTION_COOLDOWN = 1.0
+#: Why a player can be reported (App Store guideline 1.2).
+REPORT_REASONS = frozenset({"offensive_name", "abusive_reactions", "cheating", "other"})
+#: One report per reporter and player in this time, and at most this many per hour.
+REPORT_AGAIN_AFTER = 600.0
+REPORTS_PER_HOUR = 10
+REPORT_NOTE_LIMIT = 300
 
 
 DEFAULT_NAME = "Player"
@@ -184,6 +190,9 @@ class Lobby:
         self.dirty: set = set()
         #: Stats events for the server to save (see ``record``).
         self.stats: List[dict] = []
+        #: New player reports for the server to save, and when each player last reported whom.
+        self.reports: List[dict] = []
+        self.reported_at: Dict[str, Dict[str, float]] = {}
 
     # ----- stats ---------------------------------------------------------
 
@@ -498,6 +507,33 @@ class Lobby:
         for member in room.members.values():
             if not member.is_bot:
                 self.notices.append((member.id, "reaction", payload))
+
+    def report(self, pid: str, target: object, reason: object, note: object, now: float) -> dict:
+        """Report someone in your room to the admin. Keeps the name they had at the
+        time, since an offensive name is the most likely reason."""
+        room = self._room_of(pid)
+        if not isinstance(target, str) or target == pid or target not in room.names or target in room.bot_ids:
+            raise LobbyError("player_not_found")
+        if reason not in REPORT_REASONS:
+            raise LobbyError("bad_request")
+        mine = self.reported_at.setdefault(pid, {})
+        for who, at in list(mine.items()):
+            if now - at >= 3600:
+                del mine[who]
+        if now - mine.get(target, float("-inf")) < REPORT_AGAIN_AFTER:
+            raise LobbyError("already_reported")
+        if len(mine) >= REPORTS_PER_HOUR:
+            raise LobbyError("rate_limited")
+        mine[target] = now
+        profile = self.profiles.get(target)
+        report = {
+            "t": now, "reporter": pid, "target": target, "room": room.id, "reason": reason,
+            "name": profile.name if profile else room.names[target],
+            "note": " ".join(note.split())[:REPORT_NOTE_LIMIT] if isinstance(note, str) else "",
+        }
+        self.reports.append(report)
+        self.record("report", now, player=target, room=room.id, reason=reason)
+        return report
 
     def shuffle_seats(self, pid: str, now: float) -> None:
         room = self._room_of(pid)

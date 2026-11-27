@@ -494,3 +494,20 @@ def test_bots_are_easy_for_now(lobby):
     assert stats(lobby, "game_start")[0]["data"]["bot_level"] == "easy"
     restored = lobby.room_from_dict(lobby.room_to_dict(room, 1.0), 1.0)
     assert restored.members[bot.id].level == "easy"
+
+
+def test_report_a_player(lobby):
+    room, (a, b) = table(lobby, "Ada", "Bob", start=False)
+    bot = lobby.add_bot(a, 0)
+    report = lobby.report(a, b, "offensive_name", "  rude   name ", 10.0)
+    assert report["name"] == "Bob" and report["note"] == "rude name" and report["room"] == room.id
+    assert lobby.reports == [report]
+    assert [e for e in lobby.stats if e["type"] == "report"][0]["player"] == b
+    with pytest.raises(LobbyError, match="already_reported"):
+        lobby.report(a, b, "other", "", 20.0)
+    lobby.report(a, b, "other", None, 10.0 + R.REPORT_AGAIN_AFTER)
+    for target, reason in ((a, "other"), (bot.id, "other"), ("nobody", "other"), (b, "bad")):
+        with pytest.raises(LobbyError):
+            lobby.report(a, target, reason, "", 5000.0)
+    lobby.leave(b, 6000.0)
+    lobby.report(a, b, "cheating", "", 7000.0)  # still reportable after leaving

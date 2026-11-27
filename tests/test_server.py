@@ -277,3 +277,20 @@ async def test_stats_mark_deploys_and_time_requests(tmp_path):
     online = [json.loads(d) for t, d in rows if t == "online"][-1]
     assert online["requests"] == 2 and online["by_event"] == {"ping": 1, "join_room": 1}
     assert online["failed"] == {"room_not_found": 1} and online["ms_p95"] is not None
+
+
+async def test_reports_are_saved(tmp_path):
+    import sqlite3
+    db = str(tmp_path / "r.db")
+    async with Running(db) as srv:
+        ada = await Player("Ada").connect(srv.url)
+        bob = await Player("Bob").connect(srv.url)
+        room = (await ada.call("create_room"))["room_id"]
+        await bob.call("join_room", {"room_id": room})
+        assert (await ada.call("report_player", {"player_id": bob.id, "reason": "offensive_name"}))["ok"]
+        again = await ada.call("report_player", {"player_id": bob.id, "reason": "offensive_name"})
+        assert again == {"ok": False, "error": "already_reported"}
+        await ada.close()
+        await bob.close()
+    rows = sqlite3.connect(db).execute("SELECT reporter, target, name, reason, status FROM reports").fetchall()
+    assert rows == [(ada.id, bob.id, "Bob", "offensive_name", "open")]

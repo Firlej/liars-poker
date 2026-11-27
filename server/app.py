@@ -183,6 +183,7 @@ class GameServer:
     def persist(self, force: bool = False) -> None:
         if self.store is None:
             self.lobby.stats.clear()
+            self.lobby.reports.clear()
             return
         now = self.clock()
         events, self.lobby.stats = self.lobby.stats, []
@@ -191,6 +192,12 @@ class GameServer:
         except Exception:
             log.exception("saving stats failed")
             self.lobby.stats[:0] = events  # try again next time
+        reports, self.lobby.reports = self.lobby.reports, []
+        try:
+            self.store.add_reports(reports)
+        except Exception:
+            log.exception("saving reports failed")
+            self.lobby.reports[:0] = reports
         rooms = [self.lobby.room_to_dict(r, now) for r in self.lobby.rooms.values()
                  if force or self.saved_versions.get(r.id) != r.version]
         deleted = [item[1] for item in self.lobby.dirty if isinstance(item, tuple) and item[0] == "deleted"]
@@ -382,6 +389,10 @@ class GameServer:
             self.lobby.set_max_hand(pid, data.get("max_hand"), now)
             return ok()
 
+        def report_player(sid, pid, data, now):
+            self.lobby.report(pid, data.get("player_id"), data.get("reason"), data.get("note"), now)
+            return ok()
+
         def react(sid, pid, data, now):
             self.lobby.react(pid, data.get("reaction"), now)
             return ok()
@@ -393,7 +404,7 @@ class GameServer:
             "rooms": rooms, "unwatch_rooms": unwatch_rooms, "set_name": set_name,
             "create_room": create_room, "join_room": join_room, "leave_room": leave_room,
             "sync": sync, "act": act, "kick": kick, "ping": ping, "watch_bots": watch_bots,
-            "set_max_hand": set_max_hand, "react": react,
+            "set_max_hand": set_max_hand, "react": react, "report_player": report_player,
             "start_game": simple(self.lobby.start_game), "add_bot": simple(self.lobby.add_bot),
             "shuffle_seats": simple(self.lobby.shuffle_seats),
             "sit": simple(self.lobby.sit), "stand": simple(self.lobby.stand),

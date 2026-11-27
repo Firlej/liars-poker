@@ -27,6 +27,11 @@ class Store:
                         "type TEXT NOT NULL, player TEXT, room TEXT, data TEXT NOT NULL)")
         self.db.execute("CREATE INDEX IF NOT EXISTS events_type_t ON events (type, t)")
         self.db.execute("CREATE INDEX IF NOT EXISTS events_player ON events (player, t)")
+        # Player reports for the admin to act on: "open" until handled.
+        self.db.execute("CREATE TABLE IF NOT EXISTS reports (id INTEGER PRIMARY KEY, t REAL NOT NULL, "
+                        "reporter TEXT NOT NULL, target TEXT NOT NULL, name TEXT NOT NULL, room TEXT, "
+                        "reason TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'open')")
+        self.db.execute("CREATE INDEX IF NOT EXISTS reports_status ON reports (status, t)")
 
     def load(self) -> Tuple[List[dict], List[dict]]:
         cutoff = time.time() - PROFILE_TTL
@@ -59,6 +64,16 @@ class Store:
             self.db.executemany("INSERT INTO events (t, type, player, room, data) VALUES (?, ?, ?, ?, ?)",
                                 [(e["t"], e["type"], e.get("player"), e.get("room"), json.dumps(e.get("data") or {}))
                                  for e in events])
+
+    def add_reports(self, reports: List[dict]) -> None:
+        if not reports:
+            return
+        with self.db:
+            self.db.execute("BEGIN")
+            self.db.executemany("INSERT INTO reports (t, reporter, target, name, room, reason, note) "
+                                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                [(r["t"], r["reporter"], r["target"], r["name"], r["room"], r["reason"], r["note"])
+                                 for r in reports])
 
     def close(self) -> None:
         self.db.close()
