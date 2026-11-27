@@ -19,7 +19,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from . import bots, rules
+from . import bots, names, rules
 from .engine import BETTING, OVER, REVEAL, Game, GameError, Settings
 
 #: Seconds a bot "thinks" before moving, so humans can follow.
@@ -87,10 +87,13 @@ REACTIONS = frozenset({
 REACTION_COOLDOWN = 1.0
 
 
+DEFAULT_NAME = "Player"
+
+
 def clean_name(raw: object) -> str:
     name = raw if isinstance(raw, str) else ""
     name = " ".join("".join(ch for ch in name if ch.isprintable()).split())
-    return name[:NAME_LIMIT] or "Player"
+    return name[:NAME_LIMIT] or DEFAULT_NAME
 
 
 @dataclass
@@ -263,13 +266,28 @@ class Lobby:
         """Find the player for ``token`` or register a new one."""
         pid = self.by_token.get(token) if isinstance(token, str) else None
         profile = self.profiles.get(pid) if pid else None
+        wanted = clean_name(name)
+        allowed = names.is_allowed(wanted)
         if profile is None:
             pid = "p_" + secrets.token_hex(8)
-            profile = Profile(id=pid, token=secrets.token_urlsafe(24), name=clean_name(name))
+            profile = Profile(id=pid, token=secrets.token_urlsafe(24), name=wanted if allowed else DEFAULT_NAME)
             self.profiles[pid] = profile
             self.by_token[profile.token] = pid
-        elif isinstance(name, str) and name.strip():
-            profile.name = clean_name(name)
+        elif isinstance(name, str) and name.strip() and allowed:
+            profile.name = wanted
+        if not allowed:
+            self.record("name_blocked", now, player=profile.id)
+        self.dirty.add("profiles")
+        return profile
+
+    def rename(self, pid: str, name: object, now: float) -> Profile:
+        """Change a player's name. An offensive name is refused and the old one kept."""
+        profile = self._profile(pid)
+        wanted = clean_name(name)
+        if not names.is_allowed(wanted):
+            self.record("name_blocked", now, player=pid)
+            raise LobbyError("name_not_allowed")
+        profile.name = wanted
         self.dirty.add("profiles")
         return profile
 
@@ -849,7 +867,9 @@ class Lobby:
         room.settings.max_hand = d.get("max_hand_choice")
         room.members = OrderedDict((m["id"], Member(**m)) for m in d["members"])
         room.seats = list(d["seats"])
-        room.names = dict(d["names"])
+        room.names = {pid: n if names.is_allowed(n) else DEFAULT_NAME for pid, n in d["names"].items()}
+        for member in room.members.values():
+            member.name = room.names.get(member.id, member.name)
         room.bot_ids = set(d["bot_ids"])
         room.log, room.log_seq = list(d["log"]), d["log_seq"]
         room.version, room.games_played = d["version"] + 1, d.get("games_played", 0)
@@ -872,7 +892,9 @@ class Lobby:
 
     def restore(self, profiles: List[dict], rooms: List[dict], now: float) -> None:
         for d in profiles:
-            p = Profile(id=d["id"], token=d["token"], name=d["name"], room_id=d.get("room_id"),
+            # Names saved before the filter existed are checked once more.
+            name = d["name"] if names.is_allowed(d["name"]) else DEFAULT_NAME
+            p = Profile(id=d["id"], token=d["token"], name=name, room_id=d.get("room_id"),
                         connected=False, disconnected_at=now)
             self.profiles[p.id] = p
             self.by_token[p.token] = p.id

@@ -338,7 +338,7 @@ class GameServer:
             return ok()
 
         def set_name(sid, pid, data, now):
-            profile = self.lobby.hello(self.lobby.profiles[pid].token, data.get("name"), now)
+            profile = self.lobby.rename(pid, data.get("name"), now)
             return ok(name=profile.name)
 
         def create_room(sid, pid, data, now):
