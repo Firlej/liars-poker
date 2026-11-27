@@ -426,3 +426,71 @@ def test_bots_get_fun_names_no_two_alike(lobby):
     names = [lobby.add_bot(host, 0).name for _ in range(5)]
     assert all(n in R.BOT_NAMES for n in names)
     assert len(set(names)) == len(names)
+
+
+def stats(lobby, type_):
+    return [e for e in lobby.stats if e["type"] == type_]
+
+
+def test_stats_for_a_finished_game(lobby):
+    room, (a, b) = table(lobby, "Ada", "Bob")
+    [start] = stats(lobby, "game_start")
+    assert start["data"]["humans"] == 2 and start["data"]["bots"] == 0 and not start["data"]["bot_match"]
+    lobby.leave(b, 30.0)  # Bob quits, so Ada wins
+    [end] = stats(lobby, "game_end")
+    assert end["data"]["game"] == start["data"]["game"]
+    assert end["data"]["finished"] and end["data"]["left"] == 1 and end["data"]["seconds"] == 30.0
+    games = {e["player"]: e["data"] for e in stats(lobby, "player_game")}
+    assert games[a]["won"] and games[a]["out"] is None
+    assert not games[b]["won"] and games[b]["out"] == "left"
+    lobby.leave(a, 40.0)  # the room closes, but the game was already over
+    assert len(stats(lobby, "game_end")) == 1 and stats(lobby, "room_closed")[0]["data"]["games"] == 1
+
+
+def test_stats_for_an_abandoned_game_with_bots(lobby):
+    room, (a,) = table(lobby, "Ada", start=False)
+    lobby.add_bot(a, 0)
+    lobby.add_bot(a, 0)
+    lobby.start_game(a, 0)
+    assert stats(lobby, "game_start")[0]["data"]["bots"] == 2
+    lobby.leave(a, 10.0)  # two bots still in: the room closes mid-game
+    [end] = stats(lobby, "game_end")
+    assert not end["data"]["finished"] and end["data"]["humans"] == 1 and end["data"]["bots"] == 2
+    assert end["data"]["left"] == 1 and end["data"]["winner_is_bot"] is None
+    [mine] = stats(lobby, "player_game")
+    assert mine["player"] == a and not mine["data"]["won"]
+
+
+def test_stats_never_hold_names(lobby):
+    room, (a, b) = table(lobby, "Ada", "Bob")
+    lobby.leave(b, 5.0)
+    assert "Ada" not in repr(lobby.stats) and "Bob" not in repr(lobby.stats)
+
+
+def test_stats_count_bluffs_and_checks(lobby):
+    room, (a, b) = table(lobby, "Ada", "Bob")
+    g = room.game
+    for seat in g.seats:
+        seat.hand = ["9♠"] if seat.id == a else ["T♠"]
+    first = g.current_id
+    second = b if first == a else a
+    assert act(lobby, room, first, "bet", "high_card_9")["ok"]  # true: a 9 is out
+    assert act(lobby, room, second, "bet", "pair_A")["ok"]  # a bluff
+    assert act(lobby, room, first, "check")["ok"]  # caught it
+    lobby.leave(second, 20.0)
+    games = {e["player"]: e["data"] for e in stats(lobby, "player_game")}
+    assert games[first]["bets"] == 1 and games[first]["bluffs"] == 0
+    assert games[first]["checks"] == 1 and games[first]["called_right"] == 1
+    assert games[second]["bluffs"] == 1 and games[second]["caught"] == 1 and games[second]["deals_lost"] == 1
+    [end] = stats(lobby, "game_end")
+    assert end["data"]["winner"] == first and end["data"]["bluffs"] == 1 and end["data"]["bot_level"] is None
+
+
+def test_bots_are_easy_for_now(lobby):
+    room, (a,) = table(lobby, "Ada", start=False)
+    bot = lobby.add_bot(a, 0)
+    assert bot.level == "easy"
+    lobby.start_game(a, 0)
+    assert stats(lobby, "game_start")[0]["data"]["bot_level"] == "easy"
+    restored = lobby.room_from_dict(lobby.room_to_dict(room, 1.0), 1.0)
+    assert restored.members[bot.id].level == "easy"

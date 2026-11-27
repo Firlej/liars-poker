@@ -103,3 +103,23 @@ Connection handling:
   the game confirms, or after 20 s.
 - The host role passes to another person if the host leaves. A room closes
   when its last person leaves, or after 30 minutes with nobody connected.
+
+## Stats
+
+The server keeps an `events` table in the same SQLite file, for the stats
+dashboard. Rows hold a random player id at most, never a name, cards or bets.
+Set `APP_VERSION` when deploying so each `server_start` row names the version.
+
+| type | when | data |
+| --- | --- | --- |
+| `server_start` | the server starts (a deploy) | `version`, `rooms`, `players` |
+| `session_start` / `session_end` | a player's first socket connects / last one closes | `new`, `app_version`, `platform` / `seconds` |
+| `room_created` / `room_closed` | | `bot_match` / `games` |
+| `game_start` | | `game`, `table`, `humans`, `bots`, `bot_level`, `bot_match`, `max_hand` |
+| `game_end` | someone won, or the room closed mid-game (`finished: false`) | `seconds`, `deals`, `winner`, `winner_is_bot`, `left`, `bluffs`, `timeouts`, ... |
+| `player_game` | per person, with `game_end` | `won`, `out`, `seconds`, `bets`, `bluffs`, `caught`, `checks`, `called_right`, `called_wrong`, `deals_lost`, `timeouts` |
+| `online` | every minute | `players`, `playing`, `waiting`, `bot_matches`, `in_menus`, `watching`, `requests`, `by_event`, `failed`, `ms_p50`, `ms_p95`, `ms_max` |
+| `error` | a server bug | `kind`, `message`, `players` |
+
+A bluff is a bet that was not on the table when the deal was revealed; moves
+the timer made don't count. Every bot is `easy` for now (`BOT_LEVELS`).

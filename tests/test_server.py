@@ -240,3 +240,40 @@ async def test_welcome_carries_app_versions(tmp_path):
         bob = await Player("Bob").connect(srv.url)
         assert bob.welcome_data["app_versions"] == {}
         await bob.close()
+
+
+async def test_stats_events_are_saved(tmp_path):
+    import json
+    import sqlite3
+    db = str(tmp_path / "s.db")
+    async with Running(db) as srv:
+        ada = await Player("Ada").connect(srv.url)
+        await ada.call("watch_bots", {"bots": 2})
+        await asyncio.sleep(0.3)
+        await ada.close()
+        await asyncio.sleep(0.2)
+    rows = sqlite3.connect(db).execute("SELECT type, player, data FROM events").fetchall()
+    types = [r[0] for r in rows]
+    for expected in ("session_start", "room_created", "game_start", "online", "session_end"):
+        assert expected in types
+    start = next(json.loads(d) for t, p, d in rows if t == "session_start")
+    assert start["new"] is True
+    created = next(json.loads(d) for t, p, d in rows if t == "room_created")
+    assert created["bot_match"] is True
+
+
+async def test_stats_mark_deploys_and_time_requests(tmp_path):
+    import json
+    import sqlite3
+    db = str(tmp_path / "t.db")
+    async with Running(db, version="1.2.3") as srv:
+        ada = await Player("Ada").connect(srv.url)
+        await ada.call("ping", {"t": 1})
+        await ada.call("join_room", {"room_id": "NOPE"})
+        srv.game.record_online(srv.game.clock())
+        await ada.close()
+    rows = sqlite3.connect(db).execute("SELECT type, data FROM events").fetchall()
+    assert json.loads(next(d for t, d in rows if t == "server_start"))["version"] == "1.2.3"
+    online = [json.loads(d) for t, d in rows if t == "online"][-1]
+    assert online["requests"] == 2 and online["by_event"] == {"ping": 1, "join_room": 1}
+    assert online["failed"] == {"room_not_found": 1} and online["ms_p95"] is not None

@@ -19,7 +19,7 @@ import json
 import logging
 import os
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import Callable, Dict, Optional, Set
 
 import socketio
@@ -36,6 +36,19 @@ PERSIST_SECONDS = 2.0
 #: Requests per socket: sustained rate and burst.
 RATE_PER_SECOND = 15
 RATE_BURST = 40
+#: How often the stats get a "who is online right now" row.
+STATS_SAMPLE_SECONDS = 60.0
+
+
+def short_text(value: object, limit: int = 20) -> Optional[str]:
+    return value[:limit] if isinstance(value, str) and value else None
+
+
+def percentile(values: list, share: float) -> Optional[float]:
+    if not values:
+        return None
+    ordered = sorted(values)
+    return round(ordered[min(len(ordered) - 1, int(share * len(ordered)))], 1)
 
 
 class Bucket:
@@ -54,8 +67,10 @@ class Bucket:
 class GameServer:
     def __init__(self, store: Optional[Store] = None, clock: Callable[[], float] = time.time,
                  cors: object = "*", lobby: Optional[Lobby] = None, reporter: Optional[Reporter] = None,
-                 app_versions: Optional[Dict[str, str]] = None):
+                 app_versions: Optional[Dict[str, str]] = None, version: str = "dev"):
         self.clock = clock
+        #: This server's version, saved with each start so the dashboard can mark deploys.
+        self.version = version
         #: Phone app versions, sent in ``welcome``: ``min`` is the oldest the server
         #: still works with (older apps show "Please update"), ``latest`` is the
         #: newest in the stores (older apps show a dismissable "Update available").
@@ -84,6 +99,12 @@ class GameServer:
         self.sent_list_version = -1
         self.saved_versions: Dict[str, int] = {}
         self.saved_profiles: Dict[str, tuple] = {}
+        #: When each connected player's visit began, for the stats.
+        self.session_started: Dict[str, float] = {}
+        #: Requests since the last "online" row: how long each took, and what failed.
+        self.request_ms: list = []
+        self.request_counts: Counter = Counter()
+        self.request_errors: Counter = Counter()
         self._tasks: list = []
         self._register()
         if store is not None:
@@ -109,33 +130,67 @@ class GameServer:
 
     def start(self) -> None:
         if not self._tasks:
+            self.lobby.record("server_start", self.clock(), version=self.version,
+                              rooms=len(self.lobby.rooms), players=len(self.lobby.profiles))
             self._tasks = [asyncio.ensure_future(self._ticker())]
 
     async def stop(self) -> None:
         for task in self._tasks:
             task.cancel()
         self._tasks = []
+        now = self.clock()
+        for pid, started in self.session_started.items():
+            self.lobby.record("session_end", now, player=pid, seconds=round(now - started, 1), shutdown=True)
+        self.session_started.clear()
         self.persist(force=True)
 
     async def _ticker(self) -> None:
-        last_persist = 0.0
+        last_persist = last_sample = 0.0
         while True:
             try:
                 now = self.clock()
                 self.lobby.tick(now)
                 await self.flush()
+                if now - last_sample >= STATS_SAMPLE_SECONDS:
+                    self.record_online(now)
+                    last_sample = now
                 if now - last_persist >= PERSIST_SECONDS:
                     self.persist()
                     last_persist = now
             except Exception as error:  # never let one bad room stop the clock for everyone
                 log.exception("tick failed")
                 self.reporter.report("server_tick_exception", repr(error), exc=error)
+                self.lobby.record("error", self.clock(), kind="server_tick_exception", message=repr(error)[:200])
             await asyncio.sleep(TICK_SECONDS)
+
+    def record_online(self, now: float) -> None:
+        """A "right now" row: the dashboard's live numbers over time, and the record high."""
+        rooms = self.lobby.rooms.values()
+        in_room = {m.id for r in rooms for m in r.humans()}
+        self.lobby.record("online", now, players=len(self.player_sids),
+                          playing=sum(1 for r in rooms if r.status == "playing" and not r.autoplay),
+                          waiting=sum(1 for r in rooms if r.status != "playing" and not r.autoplay),
+                          bot_matches=sum(1 for r in rooms if r.autoplay),
+                          in_menus=sum(1 for pid in self.player_sids if pid not in in_room),
+                          watching=sum(1 for r in rooms if not r.autoplay
+                                       for m in r.humans() if m.role == "spectator"),
+                          requests=len(self.request_ms), by_event=dict(self.request_counts),
+                          failed=dict(self.request_errors),
+                          ms_p50=percentile(self.request_ms, 0.5), ms_p95=percentile(self.request_ms, 0.95),
+                          ms_max=round(max(self.request_ms), 1) if self.request_ms else None)
+        self.request_ms, self.request_counts, self.request_errors = [], Counter(), Counter()
 
     def persist(self, force: bool = False) -> None:
         if self.store is None:
+            self.lobby.stats.clear()
             return
         now = self.clock()
+        events, self.lobby.stats = self.lobby.stats, []
+        try:
+            self.store.add_events(events)
+        except Exception:
+            log.exception("saving stats failed")
+            self.lobby.stats[:0] = events  # try again next time
         rooms = [self.lobby.room_to_dict(r, now) for r in self.lobby.rooms.values()
                  if force or self.saved_versions.get(r.id) != r.version]
         deleted = [item[1] for item in self.lobby.dirty if isinstance(item, tuple) and item[0] == "deleted"]
@@ -175,6 +230,10 @@ class GameServer:
             log.error("game problem in %s: %s", problem["room_id"], problem["message"])
             self.reporter.report(problem["kind"], problem["message"],
                                  {"room_id": problem["room_id"], **problem["context"]})
+            room = self.lobby.rooms.get(problem["room_id"])
+            self.lobby.record("error", self.clock(), room=problem["room_id"], kind=problem["kind"],
+                              message=problem["message"][:200],
+                              players=[m.id for m in room.humans()] if room else [])
         notices, self.lobby.notices = self.lobby.notices, []
         for pid, event, payload in notices:
             for sid in list(self.player_sids.get(pid, ())):
@@ -199,7 +258,14 @@ class GameServer:
         async def connect(sid, environ, auth=None):
             auth = auth if isinstance(auth, dict) else {}
             now = self.clock()
-            profile = self.lobby.hello(auth.get("token"), auth.get("name"), now)
+            token = auth.get("token")
+            new_player = not (isinstance(token, str) and token in self.lobby.by_token)
+            profile = self.lobby.hello(token, auth.get("name"), now)
+            if not self.player_sids.get(profile.id):
+                self.session_started[profile.id] = now
+                self.lobby.record("session_start", now, player=profile.id, new=new_player,
+                                  app_version=short_text(auth.get("app_version")),
+                                  platform=short_text(auth.get("platform")))
             self.sid_player[sid] = profile.id
             self.player_sids[profile.id].add(sid)
             self.buckets[sid] = Bucket(now)
@@ -221,8 +287,11 @@ class GameServer:
             sids = self.player_sids.get(pid, set())
             sids.discard(sid)
             if not sids:
+                now = self.clock()
                 self.player_sids.pop(pid, None)
-                self.lobby.set_connected(pid, False, self.clock())
+                self.lobby.set_connected(pid, False, now)
+                started = self.session_started.pop(pid, now)
+                self.lobby.record("session_end", now, player=pid, seconds=round(now - started, 1))
             await self.flush()
 
         def handler(name: str, fn):
@@ -231,8 +300,11 @@ class GameServer:
                 if pid is None:
                     return {"ok": False, "error": "not_connected"}
                 now = self.clock()
+                self.request_counts[name] += 1
                 if not self.buckets[sid].take(now):
+                    self.request_errors["rate_limited"] += 1
                     return {"ok": False, "error": "rate_limited"}
+                started = time.perf_counter()
                 data = data if isinstance(data, dict) else {}
                 try:
                     result = fn(sid, pid, data, now)
@@ -244,7 +316,12 @@ class GameServer:
                     log.exception("handler %s failed", name)
                     self.reporter.report("server_exception", f"{name}: {error!r}",
                                          {"event": name, "data": data}, exc=error)
+                    self.lobby.record("error", now, player=pid, kind="server_exception", event=name,
+                                      message=f"{name}: {error!r}"[:200])
                     result = {"ok": False, "error": "server_error"}
+                self.request_ms.append((time.perf_counter() - started) * 1000)
+                if isinstance(result, dict) and result.get("ok") is False:
+                    self.request_errors[str(result.get("error"))[:40]] += 1
                 await self.flush()
                 return result
             sio.on(name, wrapped)
@@ -331,7 +408,7 @@ def create_app():
     cors = "*" if cors.strip() == "*" else [o.strip() for o in cors.split(",") if o.strip()]
     db_path = os.environ.get("DB_PATH", os.path.join(os.path.dirname(__file__), "..", "data", "liars_poker.db"))
     report_url = os.environ.get("ERROR_REPORT_URL", DEFAULT_URL).strip() or None
-    server = GameServer(store=Store(db_path), cors=cors,
+    server = GameServer(store=Store(db_path), cors=cors, version=os.environ.get("APP_VERSION", "server"),
                         reporter=Reporter(report_url, version=os.environ.get("APP_VERSION", "server")),
                         app_versions={"min": os.environ.get("MIN_APP_VERSION", "").strip(),
                                       "latest": os.environ.get("LATEST_APP_VERSION", "").strip()})
