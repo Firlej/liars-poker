@@ -19,7 +19,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from . import bots, rules
+from . import bots, names, rules
 from .engine import BETTING, OVER, REVEAL, Game, GameError, Settings
 
 #: Seconds a bot "thinks" before moving, so humans can follow.
@@ -29,6 +29,13 @@ UNATTENDED_REVEAL = 4.0
 #: A finished bot match starts again after this long.
 AUTOPLAY_RESTART_AFTER = 8.0
 MAX_BOTS_MATCH = 8
+#: Bot strength, weakest first. Every bot today plays the same way, so all are "easy".
+BOT_LEVELS = ("easy", "medium", "hard")
+BOT_LEVEL = "easy"
+#: Per-player counts kept during a game for the stats (see ``_count``).
+TALLY_KEYS = ("bets", "bluffs", "caught", "checks", "called_right", "called_wrong", "deals_lost", "timeouts")
+#: Moves kept per game for the dashboard's "last rounds".
+LAST_MOVES = 12
 #: A seated player who is disconnected this long during a game leaves it.
 FORFEIT_AFTER = 120.0
 #: A disconnected member is dropped from a room without a running game after this long.
@@ -80,12 +87,21 @@ REACTIONS = frozenset({
 })
 #: Seconds between two reactions from the same player.
 REACTION_COOLDOWN = 1.0
+#: Why a player can be reported (App Store guideline 1.2).
+REPORT_REASONS = frozenset({"offensive_name", "abusive_reactions", "cheating", "other"})
+#: One report per reporter and player in this time, and at most this many per hour.
+REPORT_AGAIN_AFTER = 600.0
+REPORTS_PER_HOUR = 10
+REPORT_NOTE_LIMIT = 300
+
+
+DEFAULT_NAME = "Player"
 
 
 def clean_name(raw: object) -> str:
     name = raw if isinstance(raw, str) else ""
     name = " ".join("".join(ch for ch in name if ch.isprintable()).split())
-    return name[:NAME_LIMIT] or "Player"
+    return name[:NAME_LIMIT] or DEFAULT_NAME
 
 
 @dataclass
@@ -96,6 +112,11 @@ class Profile:
     room_id: Optional[str] = None
     connected: bool = False
     disconnected_at: Optional[float] = None
+    #: Set by the admin: the player can't change their name.
+    locked: bool = False
+    locked_at: Optional[float] = None
+    #: Names the admin took away from this player; the app may keep sending them.
+    banned_names: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -104,6 +125,8 @@ class Member:
     name: str
     is_bot: bool = False
     role: str = "player"  # "player" | "spectator"
+    #: Bots only: one of ``BOT_LEVELS``.
+    level: Optional[str] = None
 
 
 @dataclass
@@ -128,6 +151,16 @@ class Room:
     #: Bot match: restarts by itself after each game.
     autoplay: bool = False
     finished_at: Optional[float] = None
+    #: When the current game started, for the stats.
+    game_started_at: Optional[float] = None
+    #: This game's counts per player, and the current deal's bets (for spotting bluffs).
+    tally: Dict[str, Dict[str, int]] = field(default_factory=dict)
+    deal_bets: List[dict] = field(default_factory=list)
+    pending_check: Optional[dict] = None
+    #: The current deal number, who went out in which deal, and the last few moves.
+    deal_seen: int = 0
+    out_order: List[dict] = field(default_factory=list)
+    last_moves: List[dict] = field(default_factory=list)
     moves: Dict[str, "OrderedDict[str, dict]"] = field(default_factory=dict)
 
     @property
@@ -166,6 +199,120 @@ class Lobby:
         #: When each player last sent a reaction.
         self.reacted_at: Dict[str, float] = {}
         self.dirty: set = set()
+        #: Stats events for the server to save (see ``record``).
+        self.stats: List[dict] = []
+        #: Names the filter refused, for the moderation page: {"t", "player", "name"}.
+        self.refused: List[dict] = []
+        #: New player reports for the server to save, and when each player last reported whom.
+        self.reports: List[dict] = []
+        self.reported_at: Dict[str, Dict[str, float]] = {}
+
+    # ----- stats ---------------------------------------------------------
+
+    def record(self, type_: str, now: float, player: Optional[str] = None,
+               room: Optional[str] = None, **data) -> None:
+        """Note something for the stats dashboard. Only counts and random ids:
+        no names, no cards, no bets."""
+        self.stats.append({"t": now, "type": type_, "player": player, "room": room, "data": data})
+
+    def _game_key(self, room: Room) -> str:
+        return f"{room.id}.{room.games_played}.{int(room.game_started_at or 0)}"
+
+    def _record_game_end(self, room: Room, now: float, finished: bool) -> None:
+        """One ``game_end`` for the game, and one ``player_game`` per real person in it."""
+        game = room.game
+        humans = [s for s in game.seats if s.id not in room.bot_ids]
+        key = self._game_key(room)
+        started = room.game_started_at if room.game_started_at is not None else now
+        winner = game.winner if finished else None
+        level = self._bot_level(room, [s.id for s in game.seats])
+        self.record("game_end", now, room=room.id, game=key, finished=finished, table=room.name,
+                    seconds=round(now - started, 1), deals=game.deal_no,
+                    humans=len(humans), bots=len(game.seats) - len(humans), bot_match=room.autoplay,
+                    bot_level=level, winner=winner, winner_is_bot=winner in room.bot_ids if winner else None,
+                    left=sum(1 for s in humans if s.out_reason in ("left", "kicked")),
+                    bluffs=sum(t.get("bluffs", 0) for t in room.tally.values()),
+                    checks=sum(t.get("checks", 0) for t in room.tally.values()),
+                    timeouts=sum(t.get("timeouts", 0) for t in room.tally.values()),
+                    standing=self._standing(room, winner),
+                    moves=[{**m, "id": None if m["id"] in room.bot_ids else m["id"]} for m in room.last_moves])
+        for seat in humans:
+            counts = room.tally.get(seat.id, {})
+            self.record("player_game", now, player=seat.id, room=room.id, game=key, finished=finished,
+                        won=seat.id == winner, out=seat.out_reason, seconds=round(now - started, 1),
+                        players=len(game.seats), bots=len(game.seats) - len(humans), bot_level=level,
+                        **{k: counts.get(k, 0) for k in TALLY_KEYS})
+
+    def _remember_move(self, room: Room, move: dict) -> None:
+        room.last_moves.append(move)
+        del room.last_moves[:-LAST_MOVES]
+
+    def _standing(self, room: Room, winner: Optional[str]) -> List[dict]:
+        """Everyone in the game, best first: the winner, then who went out last."""
+        game = room.game
+        out = {o["id"]: o for o in room.out_order}
+        order = [s.id for s in game.seats if s.id == winner]
+        order += [s.id for s in game.seats if s.id != winner and s.id not in out]  # still in (abandoned)
+        order += [o["id"] for o in reversed(room.out_order) if o["id"] in {s.id for s in game.seats}]
+        rows = []
+        for pid in dict.fromkeys(order):
+            bot = pid in room.bot_ids
+            rows.append({"id": None if bot else pid, "bot": bot, "out_deal": out.get(pid, {}).get("deal"),
+                         "reason": out.get(pid, {}).get("reason"),
+                         "bluffs": room.tally.get(pid, {}).get("bluffs", 0)})
+        return rows
+
+    def _bot_level(self, room: Room, seats: List[str]) -> Optional[str]:
+        """The strongest bot at the table, or None without bots."""
+        levels = [(room.members[pid].level if pid in room.members else None) or BOT_LEVEL
+                  for pid in seats if pid in room.bot_ids]
+        return max(levels, key=BOT_LEVELS.index) if levels else None
+
+    def _tally(self, room: Room, pid: Optional[str], key: str) -> None:
+        if pid:
+            counts = room.tally.setdefault(pid, {})
+            counts[key] = counts.get(key, 0) + 1
+
+    def _count(self, room: Room, event: dict) -> None:
+        """Turn a game event into per-player counts. A bluff is a bet that was not
+        on the table when the deal was revealed; moves made by the timer don't count."""
+        type_ = event["type"]
+        if type_ == "new_deal":
+            room.deal_seen = event.get("deal_no", room.deal_seen)
+        if type_ == "player_eliminated":
+            room.out_order.append({"id": event.get("player_id"), "deal": room.deal_seen,
+                                   "reason": event.get("reason")})
+        if type_ in ("new_deal", "deal_voided"):
+            room.deal_bets, room.pending_check = [], None
+        elif type_ == "bet":
+            room.deal_bets.append({"player_id": event["player_id"], "bet": event["bet"],
+                                   "auto": bool(event.get("auto"))})
+            self._remember_move(room, {"deal": room.deal_seen, "id": event["player_id"], "bet": event["bet"],
+                                       "auto": bool(event.get("auto"))})
+            if not event.get("auto"):
+                self._tally(room, event["player_id"], "bets")
+        elif type_ == "turn_timeout":
+            self._tally(room, event.get("player_id"), "timeouts")
+        elif type_ == "check":
+            room.pending_check = {"checker": event["player_id"], "bettor": event.get("bettor_id"),
+                                  "auto": bool(event.get("auto"))}
+            if not event.get("auto"):
+                self._tally(room, event["player_id"], "checks")
+        elif type_ == "deal_result":
+            cards = [card for hand in (event.get("hands") or {}).values() for card in hand]
+            for bet in room.deal_bets:
+                if not bet["auto"] and not rules.bet_holds(bet["bet"], cards):
+                    self._tally(room, bet["player_id"], "bluffs")
+            check = room.pending_check or {}
+            if check:
+                self._remember_move(room, {"deal": room.deal_seen, "id": check["checker"], "check": True,
+                                           "held": bool(event["held"]), "auto": check["auto"]})
+            if not event["held"]:
+                self._tally(room, check.get("bettor"), "caught")
+            if check and not check["auto"]:
+                self._tally(room, check["checker"], "called_wrong" if event["held"] else "called_right")
+            self._tally(room, event.get("loser_id"), "deals_lost")
+            room.deal_bets, room.pending_check = [], None
 
     # ----- identity ------------------------------------------------------
 
@@ -173,15 +320,69 @@ class Lobby:
         """Find the player for ``token`` or register a new one."""
         pid = self.by_token.get(token) if isinstance(token, str) else None
         profile = self.profiles.get(pid) if pid else None
+        wanted = clean_name(name)
+        allowed = names.is_allowed(wanted)
         if profile is None:
             pid = "p_" + secrets.token_hex(8)
-            profile = Profile(id=pid, token=secrets.token_urlsafe(24), name=clean_name(name))
+            profile = Profile(id=pid, token=secrets.token_urlsafe(24), name=wanted if allowed else DEFAULT_NAME)
             self.profiles[pid] = profile
             self.by_token[profile.token] = pid
-        elif isinstance(name, str) and name.strip():
-            profile.name = clean_name(name)
+        elif (isinstance(name, str) and name.strip() and allowed and not profile.locked
+              and not self._banned(profile, wanted)):
+            profile.name = wanted
+        if not allowed:
+            self._refuse(profile.id, wanted, now)
         self.dirty.add("profiles")
         return profile
+
+    def _banned(self, profile: Profile, name: str) -> bool:
+        return name.casefold() in (n.casefold() for n in profile.banned_names)
+
+    def _refuse(self, pid: str, name: str, now: float) -> None:
+        self.record("name_blocked", now, player=pid)
+        self.refused.append({"t": now, "player": pid, "name": name})
+
+    def rename(self, pid: str, name: object, now: float) -> Profile:
+        """Change a player's name. An offensive name is refused and the old one kept."""
+        profile = self._profile(pid)
+        wanted = clean_name(name)
+        if profile.locked:
+            raise LobbyError("name_locked")
+        if not names.is_allowed(wanted):
+            self._refuse(pid, wanted, now)
+            raise LobbyError("name_not_allowed")
+        if self._banned(profile, wanted):
+            raise LobbyError("name_not_allowed")
+        profile.name = wanted
+        self.dirty.add("profiles")
+        return profile
+
+    # ----- admin ---------------------------------------------------------
+
+    def admin_rename(self, pid: str, name: str, now: float) -> str:
+        """Give a player a new name (the admin's "Reset name"). Their old name is
+        refused from them from now on. Returns the old name."""
+        profile = self._profile(pid)
+        old = profile.name
+        if old != DEFAULT_NAME and not self._banned(profile, old):
+            profile.banned_names.append(old)
+        profile.name = clean_name(name)
+        room = self.rooms.get(profile.room_id or "")
+        if room and pid in room.members:
+            member = room.members[pid]
+            member.name = ""  # so the old name doesn't count as taken
+            member.name = self._unique_name(room, profile.name)
+            room.names[pid] = member.name
+            room.touch()
+            self.list_version += 1
+        self.dirty.add("profiles")
+        return old
+
+    def set_locked(self, pid: str, locked: bool, now: float) -> None:
+        profile = self._profile(pid)
+        profile.locked = locked
+        profile.locked_at = now if locked else None
+        self.dirty.add("profiles")
 
     def set_connected(self, pid: str, connected: bool, now: float) -> None:
         profile = self.profiles.get(pid)
@@ -245,13 +446,14 @@ class Lobby:
             n += 1
         return f"{name[:NAME_LIMIT - 3]} {n}"
 
-    def create_room(self, pid: str, now: float) -> Room:
+    def create_room(self, pid: str, now: float, bot_match: bool = False) -> Room:
         profile = self._profile(pid)
         self.leave(pid, now)
         room = Room(id=self._new_room_id(), name=self._new_room_name(), host_id=pid, created_at=now)
         self.rooms[room.id] = room
         self._add_member(room, profile, now)
         self.list_version += 1
+        self.record("room_created", now, player=pid, room=room.id, bot_match=bot_match)
         return room
 
     def join_room(self, pid: str, room_id: object, now: float) -> Room:
@@ -311,7 +513,7 @@ class Lobby:
             profile.room_id = None
         self._log(room, now, "player_left", pid, reason=reason)
         if not room.humans():
-            self._delete_room(room)
+            self._delete_room(room, now)
             return
         if room.host_id == pid:
             self._pick_host(room)
@@ -325,7 +527,10 @@ class Lobby:
         room.host_id = humans[0].id
         self._log(room, None, "host_changed", room.host_id)
 
-    def _delete_room(self, room: Room) -> None:
+    def _delete_room(self, room: Room, now: float) -> None:
+        if room.game is not None and room.game.phase != OVER:
+            self._record_game_end(room, now, finished=False)
+        self.record("room_closed", now, room=room.id, games=room.games_played, bot_match=room.autoplay)
         for member in list(room.members.values()):
             profile = self.profiles.get(member.id)
             if profile and profile.room_id == room.id:
@@ -350,7 +555,7 @@ class Lobby:
             while f"Bot {n}" in taken:
                 n += 1
             name = f"Bot {n}"
-        bot = Member(id="b_" + secrets.token_hex(6), name=name, is_bot=True)
+        bot = Member(id="b_" + secrets.token_hex(6), name=name, is_bot=True, level=BOT_LEVEL)
         room.members[bot.id] = bot
         room.names[bot.id] = bot.name
         room.bot_ids.add(bot.id)
@@ -386,6 +591,33 @@ class Lobby:
         for member in room.members.values():
             if not member.is_bot:
                 self.notices.append((member.id, "reaction", payload))
+
+    def report(self, pid: str, target: object, reason: object, note: object, now: float) -> dict:
+        """Report someone in your room to the admin. Keeps the name they had at the
+        time, since an offensive name is the most likely reason."""
+        room = self._room_of(pid)
+        if not isinstance(target, str) or target == pid or target not in room.names or target in room.bot_ids:
+            raise LobbyError("player_not_found")
+        if reason not in REPORT_REASONS:
+            raise LobbyError("bad_request")
+        mine = self.reported_at.setdefault(pid, {})
+        for who, at in list(mine.items()):
+            if now - at >= 3600:
+                del mine[who]
+        if now - mine.get(target, float("-inf")) < REPORT_AGAIN_AFTER:
+            raise LobbyError("already_reported")
+        if len(mine) >= REPORTS_PER_HOUR:
+            raise LobbyError("rate_limited")
+        mine[target] = now
+        profile = self.profiles.get(target)
+        report = {
+            "t": now, "reporter": pid, "target": target, "room": room.id, "reason": reason,
+            "name": profile.name if profile else room.names[target],
+            "note": " ".join(note.split())[:REPORT_NOTE_LIMIT] if isinstance(note, str) else "",
+        }
+        self.reports.append(report)
+        self.record("report", now, player=target, room=room.id, reason=reason)
+        return report
 
     def shuffle_seats(self, pid: str, now: float) -> None:
         room = self._room_of(pid)
@@ -447,7 +679,14 @@ class Lobby:
         room.finished_at = None
         room.game = Game(seats, now, rng=random.Random(self.rng.random()), settings=room.settings, start=False)
         room.games_played += 1
+        room.game_started_at = now
         room.moves = {}
+        room.tally, room.deal_bets, room.pending_check = {}, [], None
+        room.deal_seen, room.out_order, room.last_moves = 0, [], []
+        bots_n = sum(1 for pid in seats if pid in room.bot_ids)
+        self.record("game_start", now, room=room.id, game=self._game_key(room), table=room.name,
+                    humans=len(seats) - bots_n, bots=bots_n, bot_match=room.autoplay,
+                    bot_level=self._bot_level(room, seats), max_hand=room.game.settings.max_hand)
         self._log(room, now, "game_start", None, players=list(seats), max_hand=room.game.settings.max_hand)
         room.game._start_deal(now)
         self._drain(room, now)
@@ -459,7 +698,7 @@ class Lobby:
         and starts again after every game, to see the game run (and catch bugs)."""
         n = bots_count if isinstance(bots_count, int) and not isinstance(bots_count, bool) else 4
         n = max(2, min(MAX_BOTS_MATCH, n))
-        room = self.create_room(pid, now)
+        room = self.create_room(pid, now, bot_match=True)
         room.name = "Bot match"
         room.autoplay = True
         self.stand(pid, now)
@@ -548,7 +787,7 @@ class Lobby:
         elif room.idle_since is None:
             room.idle_since = now
         elif now - room.idle_since >= ROOM_IDLE_AFTER:
-            self._delete_room(room)
+            self._delete_room(room, now)
             return
 
         game = room.game
@@ -629,12 +868,14 @@ class Lobby:
         if issues:
             self._problem(room, "invariant", "; ".join(issues))
         for event in room.game.drain_events():
+            self._count(room, event)
             event = dict(event)
             type_ = event.pop("type")
             pid = event.pop("player_id", None) or event.get("starter_id") or event.get("loser_id")
+            self._log(room, now, type_, pid, **event)
             if type_ == "game_won":
                 self.list_version += 1
-            self._log(room, now, type_, pid, **event)
+                self._record_game_end(room, now, finished=True)
 
     # ----- views ---------------------------------------------------------
 
@@ -737,6 +978,9 @@ class Lobby:
             "seats": room.seats, "game": room.game.to_dict() if room.game else None,
             "names": room.names, "bot_ids": sorted(room.bot_ids), "log": room.log, "log_seq": room.log_seq,
             "version": room.version, "games_played": room.games_played, "autoplay": room.autoplay,
+            "game_started_at": room.game_started_at, "tally": room.tally, "deal_bets": room.deal_bets,
+            "pending_check": room.pending_check, "deal_seen": room.deal_seen, "out_order": room.out_order,
+            "last_moves": room.last_moves,
         }
 
     def room_from_dict(self, d: dict, now: float) -> Room:
@@ -745,11 +989,20 @@ class Lobby:
         room.settings.max_hand = d.get("max_hand_choice")
         room.members = OrderedDict((m["id"], Member(**m)) for m in d["members"])
         room.seats = list(d["seats"])
-        room.names = dict(d["names"])
+        room.names = {pid: n if names.is_allowed(n) else DEFAULT_NAME for pid, n in d["names"].items()}
+        for member in room.members.values():
+            member.name = room.names.get(member.id, member.name)
         room.bot_ids = set(d["bot_ids"])
         room.log, room.log_seq = list(d["log"]), d["log_seq"]
         room.version, room.games_played = d["version"] + 1, d.get("games_played", 0)
         room.autoplay = d.get("autoplay", False)
+        room.game_started_at = d.get("game_started_at")
+        room.tally = d.get("tally") or {}
+        room.deal_bets = d.get("deal_bets") or []
+        room.pending_check = d.get("pending_check")
+        room.deal_seen = d.get("deal_seen", 0)
+        room.out_order = d.get("out_order") or []
+        room.last_moves = d.get("last_moves") or []
         if d["game"]:
             room.game = Game.from_dict(d["game"], rng=random.Random(self.rng.random()))
             # Time spent while the server was down should not count against anyone.
@@ -760,12 +1013,16 @@ class Lobby:
         return room
 
     def profile_to_dict(self, p: Profile) -> dict:
-        return {"id": p.id, "token": p.token, "name": p.name, "room_id": p.room_id}
+        return {"id": p.id, "token": p.token, "name": p.name, "room_id": p.room_id,
+                "locked": p.locked, "locked_at": p.locked_at, "banned_names": p.banned_names}
 
     def restore(self, profiles: List[dict], rooms: List[dict], now: float) -> None:
         for d in profiles:
-            p = Profile(id=d["id"], token=d["token"], name=d["name"], room_id=d.get("room_id"),
-                        connected=False, disconnected_at=now)
+            # Names saved before the filter existed are checked once more.
+            name = d["name"] if names.is_allowed(d["name"]) else DEFAULT_NAME
+            p = Profile(id=d["id"], token=d["token"], name=name, room_id=d.get("room_id"),
+                        connected=False, disconnected_at=now, locked=bool(d.get("locked")),
+                        locked_at=d.get("locked_at"), banned_names=list(d.get("banned_names") or []))
             self.profiles[p.id] = p
             self.by_token[p.token] = p.id
         for d in rooms:

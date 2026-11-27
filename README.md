@@ -18,7 +18,11 @@ docker build -t liars-poker-server . && docker run -p 4000:4000 -v liars-poker-d
 ```
 
 Environment: `PORT`, `DB_PATH` (default `data/liars_poker.db`), `CORS_ORIGINS`
-(comma-separated, default `*`), `LOG_LEVEL`. `GET /health` returns `{"ok": true}`.
+(comma-separated, default `*`), `LOG_LEVEL`, `MIN_APP_VERSION` and
+`LATEST_APP_VERSION` (phone app versions like `1.3.0`, sent to the app on
+connect: older than min shows "Please update", older than latest shows a
+dismissable "Update available"; leave both empty to show nothing). Raise
+`MIN_APP_VERSION` only after that version is live in both stores. `GET /health` returns `{"ok": true}`.
 
 Run a single process: all live game state is in memory in that process (and
 persisted to `DB_PATH`). Behind a proxy, enable WebSocket upgrades and keep
@@ -75,7 +79,12 @@ Requests are emits with an acknowledgement, answered `{ok: true, ...}` or
 `leave_room`, `start_game`, `add_bot`, `shuffle_seats`, `sit`, `stand`,
 `kick {player_id}`, `set_max_hand {max_hand}` (host, lobby only; a number
 from 1 to 12 or `null` for auto), `act {type: bet|check|ready, bet, turn_seq,
-move_id}`, `sync`, `set_name {name}`, `ping {t}`.
+move_id}`, `sync`, `set_name {name}` (an offensive name answers
+`name_not_allowed`, see `server/names.py`; a name the admin locked answers
+`name_locked`), `ping {t}`, `report_player
+{player_id, reason, note?}` (someone who sat in your room; `reason` is
+`offensive_name`, `abusive_reactions`, `cheating` or `other`; saved to the
+`reports` table, `already_reported` within 10 minutes).
 
 `state.room.max_hand` is the limit of the game on screen (or of the next game,
 in the lobby). `state.room.hand_limit` describes the next game:
@@ -99,3 +108,53 @@ Connection handling:
   the game confirms, or after 20 s.
 - The host role passes to another person if the host leaves. A room closes
   when its last person leaves, or after 30 minutes with nobody connected.
+
+## Stats
+
+The server keeps an `events` table in the same SQLite file, for the stats
+dashboard. Rows hold a random player id at most, never a name, cards or bets.
+Set `APP_VERSION` when deploying so each `server_start` row names the version.
+
+| type | when | data |
+| --- | --- | --- |
+| `server_start` | the server starts (a deploy) | `version`, `rooms`, `players` |
+| `session_start` / `session_end` | a player's first socket connects / last one closes | `new`, `app_version`, `platform` / `seconds` |
+| `room_created` / `room_closed` | | `bot_match` / `games` |
+| `game_start` | | `game`, `table`, `humans`, `bots`, `bot_level`, `bot_match`, `max_hand` |
+| `game_end` | someone won, or the room closed mid-game (`finished: false`) | `seconds`, `deals`, `winner`, `winner_is_bot`, `left`, `bluffs`, `timeouts`, ... |
+| `player_game` | per person, with `game_end` | `won`, `out`, `seconds`, `bets`, `bluffs`, `caught`, `checks`, `called_right`, `called_wrong`, `deals_lost`, `timeouts` |
+| `online` | every minute | `players`, `playing`, `waiting`, `bot_matches`, `in_menus`, `watching`, `requests`, `by_event`, `failed`, `ms_p50`, `ms_p95`, `ms_max` |
+| `error` | a server bug | `kind`, `message`, `players` |
+
+A bluff is a bet that was not on the table when the deal was revealed; moves
+the timer made don't count. Every bot is `easy` for now (`BOT_LEVELS`).
+
+## Admin dashboard
+
+`/admin` is a private dashboard for the game's owner: Overview, Players,
+Games, Problems and Moderation (reports, your own blocked words, locked
+players). It is built from the `events`, `reports` and `refused_names`
+tables; the page itself is plain HTML, CSS and JS in `server/admin_static/`.
+
+It stays off (`/admin` is a 404) until `ADMIN_PASSWORD_HASH` is set. Make one
+on any machine, then put it on the VPS, where only root can read it:
+
+```bash
+.venv/bin/python -m server.admin          # asks for the password twice, prints scrypt$...
+# on the VPS, as root: one line, ADMIN_PASSWORD_HASH='scrypt$...' (single quotes)
+nano /etc/liars-poker.env && chmod 600 /etc/liars-poker.env && systemctl restart liars-poker
+```
+
+`deploy/deploy-vps.sh` loads `/etc/liars-poker.env` into the service. Other
+settings: `STATS_TZ` (default `Europe/Warsaw`, for days and hours on the
+charts) and `LATEST_APP_VERSION` / `MIN_APP_VERSION` (the "Old app version"
+problem). The login cookie lasts 30 days; each wrong password locks that
+address for 10 s, longer after five, and 30 misses in an hour lock the login
+for everyone for 5 minutes.
+
+To look at it with made-up data, fill a separate file and point a local server at it:
+
+```bash
+.venv/bin/python scripts/seed_dashboard.py /tmp/demo.db
+ADMIN_PASSWORD_HASH='scrypt$...' DB_PATH=/tmp/demo.db .venv/bin/uvicorn --factory server.app:create_app --port 4100
+```

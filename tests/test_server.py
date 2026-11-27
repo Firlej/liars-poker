@@ -19,12 +19,13 @@ def free_port():
 
 
 class Running:
-    def __init__(self, db):
+    def __init__(self, db, **options):
         self.db = db
+        self.options = options
         self.port = free_port()
 
     async def __aenter__(self):
-        self.game = GameServer(store=Store(self.db))
+        self.game = GameServer(store=Store(self.db), **self.options)
         config = uvicorn.Config(self.game.app, host="127.0.0.1", port=self.port, log_level="warning", lifespan="on",
                                 timeout_graceful_shutdown=1)
         self.server = uvicorn.Server(config)
@@ -55,6 +56,7 @@ class Player:
         @self.sio.on("welcome")
         def on_welcome(data):
             self.id, self.token = data["player_id"], data["token"]
+            self.welcome_data = data
             self.welcome.set()
 
         @self.sio.on("state")
@@ -227,3 +229,68 @@ def test_reporter_dedupes_and_limits(monkeypatch):
         r.report("x", f"different {i}")
     assert len(sent) == reporting.MAX_PER_HOUR
     assert reporting.Reporter(None).report("x", "y") is False
+
+
+async def test_welcome_carries_app_versions(tmp_path):
+    async with Running(str(tmp_path / "a.db"), app_versions={"min": "1.3.0", "latest": "1.4.0"}) as srv:
+        ada = await Player("Ada").connect(srv.url)
+        assert ada.welcome_data["app_versions"] == {"min": "1.3.0", "latest": "1.4.0"}
+        await ada.close()
+    async with Running(str(tmp_path / "b.db"), app_versions={"min": "", "latest": ""}) as srv:
+        bob = await Player("Bob").connect(srv.url)
+        assert bob.welcome_data["app_versions"] == {}
+        await bob.close()
+
+
+async def test_stats_events_are_saved(tmp_path):
+    import json
+    import sqlite3
+    db = str(tmp_path / "s.db")
+    async with Running(db) as srv:
+        ada = await Player("Ada").connect(srv.url)
+        await ada.call("watch_bots", {"bots": 2})
+        await asyncio.sleep(0.3)
+        await ada.close()
+        await asyncio.sleep(0.2)
+    rows = sqlite3.connect(db).execute("SELECT type, player, data FROM events").fetchall()
+    types = [r[0] for r in rows]
+    for expected in ("session_start", "room_created", "game_start", "online", "session_end"):
+        assert expected in types
+    start = next(json.loads(d) for t, p, d in rows if t == "session_start")
+    assert start["new"] is True
+    created = next(json.loads(d) for t, p, d in rows if t == "room_created")
+    assert created["bot_match"] is True
+
+
+async def test_stats_mark_deploys_and_time_requests(tmp_path):
+    import json
+    import sqlite3
+    db = str(tmp_path / "t.db")
+    async with Running(db, version="1.2.3") as srv:
+        ada = await Player("Ada").connect(srv.url)
+        await ada.call("ping", {"t": 1})
+        await ada.call("join_room", {"room_id": "NOPE"})
+        srv.game.record_online(srv.game.clock())
+        await ada.close()
+    rows = sqlite3.connect(db).execute("SELECT type, data FROM events").fetchall()
+    assert json.loads(next(d for t, d in rows if t == "server_start"))["version"] == "1.2.3"
+    online = [json.loads(d) for t, d in rows if t == "online"][-1]
+    assert online["requests"] == 2 and online["by_event"] == {"ping": 1, "join_room": 1}
+    assert online["failed"] == {"room_not_found": 1} and online["ms_p95"] is not None
+
+
+async def test_reports_are_saved(tmp_path):
+    import sqlite3
+    db = str(tmp_path / "r.db")
+    async with Running(db) as srv:
+        ada = await Player("Ada").connect(srv.url)
+        bob = await Player("Bob").connect(srv.url)
+        room = (await ada.call("create_room"))["room_id"]
+        await bob.call("join_room", {"room_id": room})
+        assert (await ada.call("report_player", {"player_id": bob.id, "reason": "offensive_name"}))["ok"]
+        again = await ada.call("report_player", {"player_id": bob.id, "reason": "offensive_name"})
+        assert again == {"ok": False, "error": "already_reported"}
+        await ada.close()
+        await bob.close()
+    rows = sqlite3.connect(db).execute("SELECT reporter, target, name, reason, status FROM reports").fetchall()
+    assert rows == [(ada.id, bob.id, "Bob", "offensive_name", "open")]
