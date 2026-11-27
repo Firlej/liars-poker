@@ -24,6 +24,8 @@ from typing import Callable, Dict, Optional, Set
 
 import socketio
 
+from . import names
+from .admin import Admin
 from .engine import GameError
 from .reporting import DEFAULT_URL, Reporter
 from .rooms import Lobby, Room
@@ -67,7 +69,9 @@ class Bucket:
 class GameServer:
     def __init__(self, store: Optional[Store] = None, clock: Callable[[], float] = time.time,
                  cors: object = "*", lobby: Optional[Lobby] = None, reporter: Optional[Reporter] = None,
-                 app_versions: Optional[Dict[str, str]] = None, version: str = "dev"):
+                 app_versions: Optional[Dict[str, str]] = None, version: str = "dev",
+                 admin_password_hash: Optional[str] = None, db_path: Optional[str] = None,
+                 stats_tz: str = "Europe/Warsaw"):
         self.clock = clock
         #: This server's version, saved with each start so the dashboard can mark deploys.
         self.version = version
@@ -108,17 +112,22 @@ class GameServer:
         self._tasks: list = []
         self._register()
         if store is not None:
+            # The admin's own blocked words, before saved names are checked again.
+            names.set_custom((w, whole) for w, whole, _ in store.blocked_words())
             profiles, rooms = store.load()
             self.lobby.restore(profiles, rooms, clock())
             for room in self.lobby.rooms.values():
                 self.saved_versions[room.id] = room.version
             log.info("restored %d rooms, %d players", len(self.lobby.rooms), len(self.lobby.profiles))
+        self.admin = Admin(self, admin_password_hash, db_path, stats_tz)
 
     # ----- plain HTTP ----------------------------------------------------
 
     async def _http(self, scope, receive, send):
         if scope["type"] != "http":
             return
+        if scope.get("path", "").startswith("/admin"):
+            return await self.admin.handle(scope, receive, send)
         body = json.dumps({"ok": True, "rooms": len(self.lobby.rooms),
                            "online": len(self.player_sids)}).encode()
         status = 200 if scope.get("path") in ("/", "/health") else 404
@@ -184,6 +193,7 @@ class GameServer:
         if self.store is None:
             self.lobby.stats.clear()
             self.lobby.reports.clear()
+            self.lobby.refused.clear()
             return
         now = self.clock()
         events, self.lobby.stats = self.lobby.stats, []
@@ -193,17 +203,20 @@ class GameServer:
             log.exception("saving stats failed")
             self.lobby.stats[:0] = events  # try again next time
         reports, self.lobby.reports = self.lobby.reports, []
+        refused, self.lobby.refused = self.lobby.refused, []
         try:
             self.store.add_reports(reports)
+            self.store.add_refused(refused)
         except Exception:
             log.exception("saving reports failed")
             self.lobby.reports[:0] = reports
+            self.lobby.refused[:0] = refused
         rooms = [self.lobby.room_to_dict(r, now) for r in self.lobby.rooms.values()
                  if force or self.saved_versions.get(r.id) != r.version]
         deleted = [item[1] for item in self.lobby.dirty if isinstance(item, tuple) and item[0] == "deleted"]
         profiles = []
         for p in self.lobby.profiles.values():
-            key = (p.name, p.room_id)
+            key = (p.name, p.room_id, p.locked, len(p.banned_names))
             if force or self.saved_profiles.get(p.id) != key:
                 profiles.append(self.lobby.profile_to_dict(p))
                 self.saved_profiles[p.id] = key
@@ -420,6 +433,8 @@ def create_app():
     db_path = os.environ.get("DB_PATH", os.path.join(os.path.dirname(__file__), "..", "data", "liars_poker.db"))
     report_url = os.environ.get("ERROR_REPORT_URL", DEFAULT_URL).strip() or None
     server = GameServer(store=Store(db_path), cors=cors, version=os.environ.get("APP_VERSION", "server"),
+                        admin_password_hash=os.environ.get("ADMIN_PASSWORD_HASH"), db_path=db_path,
+                        stats_tz=os.environ.get("STATS_TZ", "Europe/Warsaw"),
                         reporter=Reporter(report_url, version=os.environ.get("APP_VERSION", "server")),
                         app_versions={"min": os.environ.get("MIN_APP_VERSION", "").strip(),
                                       "latest": os.environ.get("LATEST_APP_VERSION", "").strip()})

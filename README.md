@@ -80,7 +80,8 @@ Requests are emits with an acknowledgement, answered `{ok: true, ...}` or
 `kick {player_id}`, `set_max_hand {max_hand}` (host, lobby only; a number
 from 1 to 12 or `null` for auto), `act {type: bet|check|ready, bet, turn_seq,
 move_id}`, `sync`, `set_name {name}` (an offensive name answers
-`name_not_allowed`, see `server/names.py`), `ping {t}`, `report_player
+`name_not_allowed`, see `server/names.py`; a name the admin locked answers
+`name_locked`), `ping {t}`, `report_player
 {player_id, reason, note?}` (someone who sat in your room; `reason` is
 `offensive_name`, `abusive_reactions`, `cheating` or `other`; saved to the
 `reports` table, `already_reported` within 10 minutes).
@@ -127,3 +128,33 @@ Set `APP_VERSION` when deploying so each `server_start` row names the version.
 
 A bluff is a bet that was not on the table when the deal was revealed; moves
 the timer made don't count. Every bot is `easy` for now (`BOT_LEVELS`).
+
+## Admin dashboard
+
+`/admin` is a private dashboard for the game's owner: Overview, Players,
+Games, Problems and Moderation (reports, your own blocked words, locked
+players). It is built from the `events`, `reports` and `refused_names`
+tables; the page itself is plain HTML, CSS and JS in `server/admin_static/`.
+
+It stays off (`/admin` is a 404) until `ADMIN_PASSWORD_HASH` is set. Make one
+on any machine, then put it on the VPS, where only root can read it:
+
+```bash
+.venv/bin/python -m server.admin          # asks for the password twice, prints scrypt$...
+# on the VPS, as root: one line, ADMIN_PASSWORD_HASH='scrypt$...' (single quotes)
+nano /etc/liars-poker.env && chmod 600 /etc/liars-poker.env && systemctl restart liars-poker
+```
+
+`deploy/deploy-vps.sh` loads `/etc/liars-poker.env` into the service. Other
+settings: `STATS_TZ` (default `Europe/Warsaw`, for days and hours on the
+charts) and `LATEST_APP_VERSION` / `MIN_APP_VERSION` (the "Old app version"
+problem). The login cookie lasts 30 days; each wrong password locks that
+address for 10 s, longer after five, and 30 misses in an hour lock the login
+for everyone for 5 minutes.
+
+To look at it with made-up data, fill a separate file and point a local server at it:
+
+```bash
+.venv/bin/python scripts/seed_dashboard.py /tmp/demo.db
+ADMIN_PASSWORD_HASH='scrypt$...' DB_PATH=/tmp/demo.db .venv/bin/uvicorn --factory server.app:create_app --port 4100
+```
