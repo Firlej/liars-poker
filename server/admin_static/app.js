@@ -43,6 +43,14 @@
     circleCheck: '<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>',
     inside: '<path d="M17 6H3M21 12H3M15 18H3"/>',
     whole: '<path d="M4 7V4h16v3M9 20h6M12 4v16"/>',
+    message: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+    history: '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5M12 7v5l4 2"/>',
+    bulb: '<path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5"/><path d="M9 18h6M10 22h4"/>',
+    more: '<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>',
+    external: '<path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
+    image: '<rect width="18" height="18" x="3" y="3" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.09-3.09a2 2 0 0 0-2.82 0L6 21"/>',
+    file: '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4M16 13H8M16 17H8M10 9H8"/>',
+    mic: '<path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"/>',
   };
   const icon = (name, cls = '') => `<svg class="svg ${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ''}</svg>`;
 
@@ -62,7 +70,9 @@
     if (d < 90) return 'now';
     if (d < 3600) return `${Math.round(d / 60)}m ago`;
     if (d < 86400) return `${Math.round(d / 3600)}h ago`;
-    return `${Math.round(d / 86400)}d ago`;
+    if (d < 60 * 86400) return `${Math.round(d / 86400)}d ago`;
+    if (d < 365 * 86400) return `${Math.round(d / (30 * 86400))}mo ago`;
+    return `${Math.round(d / (365 * 86400))}y ago`;
   };
   const day = (t) => (t ? new Date(t * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—');
   const clock = (t) => (t ? new Date(t * 1000).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : '—');
@@ -146,12 +156,28 @@
   const PAGES = [
     ['overview', 'Overview', 'grid'], ['players', 'Players', 'users'], ['games', 'Games', 'layers'],
     ['moderation', 'Moderation', 'shield'], ['problems', 'Problems', 'alert'],
+    ['feedback', 'Feedback', 'message'], ['changelog', 'Changelog', 'history'], ['requests', 'Requests', 'bulb'],
+    ['more', 'More', 'more'],
   ];
+  /** The sidebar's two groups; on a phone the tab bar has four pages and More. */
+  const NAV_GROUPS = [['Stats', ['overview', 'players', 'games', 'moderation', 'problems']], ['Product', ['feedback', 'changelog', 'requests']]];
+  const PHONE_TABS = ['overview', 'players', 'games', 'problems', 'more'];
+  const MORE_PAGES = ['moderation', 'feedback', 'changelog', 'requests'];
+  /** Pages without data of their own. */
+  const NO_DATA = ['more'];
+  const badge = (id) => {
+    const shell = state.shell || {};
+    if (id === 'moderation') return shell.reports_open;
+    if (id === 'problems') return shell.problems_open;
+    if (id === 'feedback') return shell.feedback_open;
+    if (id === 'more') return MORE_PAGES.reduce((n, p) => n + (p === 'feedback' ? 0 : badge(p) || 0), 0);
+    return 0;
+  };
   const saved = (key, fallback) => { try { return localStorage.getItem(key) || fallback; } catch { return fallback; } };
   const state = {
-    page: 'overview', range: saved('lp_range', '7d'), tabs: { players: 'all', games: 'all', problems: 'open', moderation: 'open', words: 'yours' },
-    q: { players: '', games: '', problems: '', moderation: '' }, sort: 'last_seen', pageNo: { players: 0, games: 0 },
-    sel: { players: null, problems: null, moderation: null }, sheet: null, data: null, detail: null, game: null,
+    page: 'overview', range: saved('lp_range', '7d'), tabs: { players: 'all', games: 'all', problems: 'open', moderation: 'open', words: 'yours', feedback: 'open', requests: 'now' },
+    q: { players: '', games: '', problems: '', moderation: '', feedback: '' }, sort: 'last_seen', pageNo: { players: 0, games: 0 },
+    sel: { players: null, problems: null, moderation: null, feedback: null }, sheet: null, data: null, detail: null, game: null,
     shell: null, updated: 0, failed: false, showWords: false, login: null, wordInput: '', wordWhole: false,
     newName: null, blockOld: true, lockName: false, builtinAll: {}, allTables: false, tip: null,
   };
@@ -191,6 +217,16 @@
   async function load(quiet = false) {
     const ticket = ++loading;
     const page = state.page;
+    if (NO_DATA.includes(page)) {
+      state.data = {};
+      try {
+        const res = await api('changelog');
+        if (ticket !== loading) return;
+        if (res.ok) { state.shell = res.shell; state.updated = now(); state.failed = false; }
+      } catch (error) { if (error.message === 'login') return; }
+      render(quiet);
+      return;
+    }
     const params = new URLSearchParams({ range: state.range });
     if (state.tabs[page]) params.set('tab', state.tabs[page]);
     if (state.q[page]) params.set('q', state.q[page]);
@@ -255,7 +291,7 @@
         <main class="main">
           <div class="phone-top"><div class="brand"><span class="logo">${icon('spade')}</span>Liar's Poker</div>${updated()}</div>
           <header class="top">
-            <div><div class="eyebrow">Liar's Poker &nbsp;/&nbsp; ${state.page === 'overview' ? 'Stats' : esc(page[1])}</div><h1>${esc(page[1])}</h1></div>
+            <div><div class="eyebrow">Liar's Poker &nbsp;/&nbsp; ${state.page === 'overview' ? 'Stats' : NAV_GROUPS[1][1].includes(state.page) ? `Product &nbsp;/&nbsp; ${esc(page[1])}` : esc(page[1])}</div><h1>${esc(page[1])}</h1></div>
             <div class="top-tools">${tools()}</div>
           </header>
           ${body}
@@ -279,11 +315,12 @@
     const m = shell.month;
     return `<aside class="side">
       <div class="brand"><span class="logo">${icon('spade')}</span>Liar's Poker</div>
-      <div class="eyebrow">Stats</div>
-      <nav class="nav">${PAGES.map(([id, label, ic]) => {
-        const count = id === 'moderation' ? shell.reports_open : id === 'problems' ? shell.problems_open : 0;
-        return `<a href="#/${id}" class="${state.page === id ? 'on' : ''}">${icon(ic)}${label}${count ? `<span class="badge">${count}</span>` : ''}</a>`;
-      }).join('')}</nav>
+      ${NAV_GROUPS.map(([group, ids], i) => `<div class="eyebrow" ${i ? 'style="margin-top:18px"' : ''}>${group}</div>
+      <nav class="nav">${ids.map((id) => {
+        const [, label, ic] = PAGES.find((p) => p[0] === id);
+        const count = badge(id);
+        return `<a href="#/${id}" class="${state.page === id ? 'on' : ''}">${icon(ic)}${label}${count ? `<span class="badge ${id === 'feedback' ? 'soft' : ''}">${count}</span>` : ''}</a>`;
+      }).join('')}</nav>`).join('')}
       ${m ? `<div class="month">
         <div class="month-head"><span class="eyebrow">Players this month</span>${m.change != null ? `<span class="mono ${m.change >= 0 ? 'up' : 'down'}" style="font-size:10.5px">${m.change >= 0 ? '+' : '−'}${Math.abs(Math.round(m.change * 100))}%</span>` : ''}</div>
         <div class="month-value num">${fmt(m.this)} <small>/ last month ${fmt(m.last)}</small></div>
@@ -295,10 +332,11 @@
   }
 
   function tabbar() {
-    const shell = state.shell || {};
-    return `<nav class="tabbar">${PAGES.map(([id, label, ic]) => {
-      const count = id === 'moderation' ? shell.reports_open : id === 'problems' ? shell.problems_open : 0;
-      return `<a href="#/${id}" class="${state.page === id ? 'on' : ''}">${icon(ic)}${label}${count ? `<span class="badge">${count}</span>` : ''}</a>`;
+    const current = MORE_PAGES.includes(state.page) ? 'more' : state.page;
+    return `<nav class="tabbar">${PHONE_TABS.map((id) => {
+      const [, label, ic] = PAGES.find((p) => p[0] === id);
+      const count = badge(id);
+      return `<a href="#/${id}" class="${current === id ? 'on' : ''}">${icon(ic)}${label}${count ? `<span class="badge">${count}</span>` : ''}</a>`;
     }).join('')}</nav>`;
   }
 
@@ -309,10 +347,11 @@
   }
 
   function tools() {
-    const placeholder = { players: 'Search name or #id', games: 'Search game # or player', problems: 'Search problems or logs', moderation: 'Search name or #id' }[state.page];
+    const placeholder = { players: 'Search name or #id', games: 'Search game # or player', problems: 'Search problems or logs', moderation: 'Search name or #id', feedback: 'Search feedback' }[state.page];
     const search = placeholder ? `<label class="search">${icon('search')}<input id="search" data-search value="${esc(state.q[state.page])}" placeholder="${placeholder}" autocomplete="off" spellcheck="false"><span class="kbd">/</span></label>` : '';
     const words = state.page === 'moderation' ? `<button class="toggle-chip" data-act="words" aria-pressed="${state.showWords}">${icon(state.showWords ? 'eye' : 'eyeOff')}Show words<span class="switch ${state.showWords ? 'on' : ''}"></span></button>` : '';
     const ranges = ['24h', '7d', '30d', 'all'].map((r) => `<button class="${state.range === r ? 'on' : ''}" data-act="range" data-v="${r}">${r === 'all' ? 'All' : r}</button>`).join('');
+    if (['feedback', 'changelog', 'requests', 'more'].includes(state.page)) return `${search}${updated()}`;
     return `${search}${words}${updated()}<div class="seg range" role="group" aria-label="Time range">${ranges}</div>`;
   }
 
@@ -767,6 +806,123 @@
         <div class="sec" style="display:flex;align-items:center;gap:8px;font:400 11px var(--mono)">${icon('circleCheck')}${r.status === 'dismissed' ? 'Dismissed' : 'Resolved'} by you · ${day(r.handled_at)} ${clock(r.handled_at)}<button class="push link" data-act="moderate" data-v="reopen">Reopen</button></div>`}`;
   }
 
+  // ----- product: feedback, changelog, requests ---------------------------------
+  const PRIORITY = { high: ['High', 'red'], medium: ['Medium', ''], low: ['Low', ''] };
+  const priorityPill = (p) => `<span class="pill ${PRIORITY[p]?.[1] || ''}">${esc(PRIORITY[p]?.[0] || p)}</span>`;
+  const doneOrOpen = (resolved) => (resolved ? '<span class="pill green">Resolved</span>' : '<span class="pill ring dark">Open</span>');
+  const dateLong = (t) => (t ? new Date(t * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—');
+  const isoDay = (d) => (d ? Date.parse(`${d}T12:00:00`) / 1000 : null);
+
+  PAGE_RENDER.more = () => `<div class="more-list">${MORE_PAGES.map((id) => {
+    const [, label, ic] = PAGES.find((p) => p[0] === id);
+    const count = badge(id);
+    const sub = { moderation: 'Reports and blocked words', feedback: 'What players tell you, from PocketBase', changelog: 'What changed in each version', requests: 'Your board and what players asked for' }[id];
+    return `<a href="#/${id}"><span class="att-icon">${icon(ic)}</span><span><b>${label}</b><small>${sub}</small></span>${count ? `<span class="badge ${id === 'feedback' ? 'soft' : ''}">${count}</span>` : ''}${icon('right')}</a>`;
+  }).join('')}</div>`;
+
+  PAGE_RENDER.feedback = (d) => {
+    if (!d.setup) return `<div class="empty">${icon('message')}<br><br>Feedback isn't connected yet.<br>Set FEEDBACK_PB_URL, FEEDBACK_PB_EMAIL and FEEDBACK_PB_PASSWORD on the server.</div>`;
+    const k = d.kpis;
+    const tab = state.tabs.feedback;
+    const rows = d.rows.map((f) => `<tr class="${state.sel.feedback === f.id ? 'on' : ''}" data-act="select" data-id="${esc(f.id)}">
+        <td class="r-when"><div>${whenShort(f.t)}</div><div class="foot">${ago(f.t)}</div></td>
+        <td class="fb-msg"><div class="clamp ${f.test ? 'muted' : ''}">${esc(f.message) || '<span class="foot">No text</span>'}</div>
+          <div class="tags">${f.place ? `<span class="word-tag">${esc(f.place)}</span>` : ''}${f.has_logs ? `<span class="word-tag red">${icon('file')}Crash log</span>` : ''}${f.shots ? `<span class="word-tag">${icon('image')}${f.shots > 1 ? f.shots : ''}Screenshot</span>` : ''}${f.audio ? `<span class="word-tag">${icon('mic')}Voice</span>` : ''}${f.test ? '<span class="word-tag">Looks like a test</span>' : ''}</div></td>
+        <td class="wide">${f.version ? `v${esc(f.version)}` : '<span class="foot">—</span>'}</td>
+        <td class="wide">${priorityPill(f.priority)}</td><td class="r">${doneOrOpen(f.resolved)}</td></tr>`).join('');
+    const empty = tab === 'open' ? `${icon('circleCheck')}<br>Nothing open. Every message has been handled.` : 'No feedback here.';
+    return `${d.error === 'unreachable' ? `<div class="banner">${icon('circleAlert')}PocketBase can't be reached right now. This is the last copy.</div>` : ''}
+    <div class="kpis">
+      ${kpi('Open', fmt(k.open), `<div class="delta">${k.open_high ? `<span class="down">${k.open_high} high priority</span>` : 'none high priority'}</div>`)}
+      ${kpi('New · 7 days', fmt(k.week), delta(k.week, k.week_prev, { kind: 'abs', label: 'vs prev 7 days' }), spark(k.per_day))}
+      ${kpi('Crash reports', fmt(k.crashes), `<div class="delta">open · ${fmt(k.crashes_all)} all time</div>`)}
+      ${kpi('With screenshot', fmt(k.shots), `<div class="delta">of ${fmt(k.total)} messages</div>`)}
+      ${kpi('Resolved', pct(k.total ? k.resolved / k.total : null), `<div class="delta">${fmt(k.resolved)} of ${fmt(k.total)}${k.tests ? ` · ${k.tests} tests hidden` : ''}</div>`)}
+    </div>
+    <div class="grid">
+      <section class="cell flush">
+        <div class="panel-head pad"><span class="title">Feedback</span><span class="count ${k.open_high ? 'red' : ''}">${k.open} open</span>
+          <span class="push">${seg('tab', [['open', 'Open', d.counts.open], ['resolved', 'Resolved', d.counts.resolved], ['all', 'All', d.counts.all]], tab)}</span></div>
+        ${d.rows.length ? `<div class="scroll"><table class="table fb"><thead><tr><th>When</th><th>Message</th><th class="wide">Version</th><th class="wide">Priority</th><th class="r">Status</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty">${empty}</div>`}
+        ${d.places.length ? `<div class="sec" style="border-top:1px solid var(--border)"><div class="panel-head"><span class="eyebrow">Open, by screen</span></div>
+          <div class="chips">${d.places.map(([p, n]) => `<span class="chip">${esc(p)} · ${n}</span>`).join('')}</div></div>` : ''}
+        <div class="sec" style="border-top:1px solid var(--border)"><div class="note">${icon('info')}Read from PocketBase every minute. Mark messages resolved in PocketBase.</div></div>
+      </section>
+      <aside class="cell flush rail ${phone() && state.detail ? 'open' : ''}" data-keep-scroll="rail">${feedbackRail(state.detail)}</aside>
+    </div>`;
+  };
+
+  function feedbackRail(f) {
+    if (!f) return `${railHead('Message')}<div class="empty">Pick a message to read it.</div>`;
+    const plat = [f.place, f.version ? `v${f.version}` : '', f.sender].filter(Boolean).map(esc).join(' · ');
+    return `<div class="rail-head">${phone() ? `<button class="link" data-act="close">${icon('left')} Back</button>` : '<span class="title">Message</span>'}<span style="display:flex;gap:6px">${priorityPill(f.priority)}${doneOrOpen(f.resolved)}</span></div>
+      <div class="sec"><div class="fb-full">${esc(f.message) || '<span class="foot">No text, only a log.</span>'}</div>
+        <div class="delta" style="margin-top:12px">${dateLong(f.t)} ${clock(f.t)}${plat ? ` · ${plat}` : ''}</div></div>
+      ${f.screenshots.length ? `<div class="sec"><div class="eyebrow" style="margin-bottom:12px">Screenshot${f.screenshots.length > 1 ? 's' : ''}</div>
+        <div class="shots">${f.screenshots.map((s) => `<a href="${esc(s.full)}" target="_blank" rel="noopener noreferrer"><img src="${esc(s.thumb)}" alt="Screenshot from the player" loading="lazy"></a>`).join('')}</div></div>` : ''}
+      ${f.audio_url ? `<div class="sec"><div class="eyebrow" style="margin-bottom:12px">Voice note</div><audio controls preload="none" src="${esc(f.audio_url)}" style="width:100%"></audio></div>` : ''}
+      ${f.notes ? `<div class="sec"><div class="eyebrow" style="margin-bottom:8px">Your notes</div><div class="mono" style="font-size:11.5px;white-space:pre-wrap">${esc(f.notes)}</div></div>` : ''}
+      ${f.logs ? `<div class="sec"><div class="panel-head"><span class="eyebrow">Crash log</span><span class="push foot">${f.logs_cut ? `last ${Math.round(f.logs.length / 1000)} of ${Math.round(f.logs_size / 1000)} KB` : `${Math.max(1, Math.round(f.logs_size / 1000))} KB`}</span></div>
+        <pre class="logs">${esc(f.logs)}</pre></div>` : ''}
+      <div class="actions" style="grid-template-columns:1.4fr 1fr"><a class="btn primary" href="${esc(f.pocketbase)}" target="_blank" rel="noopener noreferrer">${icon('external')}Open in PocketBase</a>
+        <button class="btn" data-act="copy-feedback">${icon('copy')}Copy</button></div>`;
+  }
+
+  const KIND = { new: ['New', 'green'], better: ['Better', ''], fix: ['Fix', 'amber'] };
+  PAGE_RENDER.changelog = (d) => {
+    const released = d.releases.filter((r) => r.status === 'released');
+    const next = d.releases.find((r) => r.status !== 'released');
+    const shipped = released.reduce((n, r) => n + r.items.length, 0);
+    const last = released[0];
+    const byKind = (items, kind) => items.filter((i) => i.kind === kind).length;
+    const month = now() - 30 * 86400;
+    const recent = d.releases.reduce((n, r) => n + r.items.filter((i) => (isoDay(i.date || r.date) ?? now()) > month).length, 0);
+    return `<div class="kpis">
+      ${kpi('Releases', fmt(released.length), `<div class="delta">since ${dateLong(isoDay(released[released.length - 1]?.date))}</div>`)}
+      ${kpi('Changes shipped', fmt(shipped), `<div class="delta">${released.reduce((n, r) => n + byKind(r.items, 'new'), 0)} new · ${released.reduce((n, r) => n + byKind(r.items, 'fix'), 0)} fixes</div>`)}
+      ${kpi('Waiting to ship', fmt(next ? next.items.length : 0), '<div class="delta">in the next release</div>')}
+      ${kpi('Last release', last ? esc(last.version) : '—', `<div class="delta">${last ? `${dateLong(isoDay(last.date))} · ${ago(isoDay(last.date))}` : ''}</div>`)}
+      ${kpi('Changes · 30 days', fmt(recent), '<div class="delta">shipped or waiting to ship</div>')}
+    </div>
+    <section class="cell flush">${d.releases.map((r) => `<div class="release">
+        <div class="rel-side"><div class="rel-version">${r.status === 'released' ? `v${esc(r.version)}` : 'Next'}</div>
+          <div class="foot" style="margin-top:6px">${r.date ? dateLong(isoDay(r.date)) : 'not released yet'}</div>
+          <div style="margin-top:10px">${r.status === 'released' ? '<span class="pill green">Released</span>' : '<span class="pill amber">In progress</span>'}</div></div>
+        <div class="rel-body"><h3>${esc(r.title)}</h3>
+          <div class="foot" style="margin-bottom:12px">${['new', 'better', 'fix'].map((k) => byKind(r.items, k) ? `${byKind(r.items, k)} ${KIND[k][0].toLowerCase()}` : '').filter(Boolean).join(' · ')}</div>
+          ${r.items.map((i) => `<div class="rel-item"><span class="pill plain ${KIND[i.kind]?.[1] || ''}">${KIND[i.kind]?.[0] || esc(i.kind)}</span><span>${esc(i.text)}</span><span class="word-tag">${esc(i.area)}</span></div>`).join('')}</div>
+      </div>`).join('')}
+      <div class="sec"><div class="note">${icon('info')}Written by hand from the git history · updated ${dateLong(isoDay(d.updated))}</div></div>
+    </section>`;
+  };
+
+  const COLUMNS = [['now', 'Now'], ['next', 'Next'], ['later', 'Later'], ['done', 'Done']];
+  PAGE_RENDER.requests = (d) => {
+    const col = (s) => d.items.filter((i) => (s === 'later' ? i.status === 'later' || i.status === 'idea' : i.status === s));
+    const asked = d.items.filter((i) => i.feedback && i.feedback.length);
+    const askedDone = asked.filter((i) => i.status === 'done');
+    const card = (i) => `<div class="req">
+        <div class="req-title">${esc(i.title)}</div>
+        <div class="tags">${i.url ? `<a class="word-tag" href="${esc(i.url)}" target="_blank" rel="noopener noreferrer">#${i.issue}${icon('external')}</a>` : ''}<span class="word-tag">${esc(i.area)}</span>${i.status === 'idea' ? '<span class="word-tag amber">Not on the board</span>' : ''}${i.shipped ? `<span class="word-tag green">${i.shipped === 'Next' ? 'In the next release' : `Shipped in ${esc(i.shipped)}`}</span>` : ''}</div>
+        ${i.feedback && i.feedback.length ? `<div class="asked">${icon('message')}${i.feedback.length} player message${i.feedback.length > 1 ? 's' : ''}
+          ${i.feedback.map((f) => f.message ? `<a href="#/feedback?tab=all&sel=${encodeURIComponent(f.id)}" class="quote">“${esc(f.message.length > 140 ? `${f.message.slice(0, 140)}…` : f.message)}”<span class="foot"> · ${day(f.t)}</span></a>` : '').join('')}</div>` : ''}
+      </div>`;
+    const tab = state.tabs.requests;
+    const columns = phone() ? COLUMNS.filter(([s]) => s === tab) : COLUMNS;
+    return `<div class="kpis">
+      ${kpi('Now', fmt(col('now').length), '<div class="delta">being worked on</div>')}
+      ${kpi('Next', fmt(col('next').length), '<div class="delta">up after that</div>')}
+      ${kpi('Later', fmt(col('later').length), `<div class="delta">${d.items.filter((i) => i.status === 'idea').length} not on the board yet</div>`)}
+      ${kpi('Done', fmt(col('done').length), '<div class="delta">on the board and from players</div>')}
+      ${kpi('Players asked, you built', `${askedDone.length}<small style="font-size:14px;color:var(--muted)"> / ${asked.length}</small>`, '<div class="delta">requests from feedback</div>')}
+    </div>
+    ${phone() ? `<div class="sec seg-full" style="padding-top:16px;padding-bottom:16px">${seg('req-tab', COLUMNS.map(([s, l]) => [s, l, col(s).length]), tab)}</div>` : ''}
+    <div class="board">${columns.map(([s, label]) => `<section class="board-col">
+        <div class="panel-head" style="margin-bottom:14px"><span class="title">${label}</span><span class="count">${col(s).length}</span></div>
+        ${col(s).map(card).join('') || '<div class="empty" style="padding:24px 0">Nothing here.</div>'}</section>`).join('')}</div>
+    <div class="sec" style="border-top:1px solid var(--border)"><div class="note wrap">${icon('info')}From the GitHub board and player feedback, written by hand · updated ${dateLong(isoDay(d.updated))} · <a class="link" href="${esc(d.board)}" target="_blank" rel="noopener noreferrer">Open the board ${icon('external')}</a></div></div>`;
+  };
+
   // ----- login --------------------------------------------------------------
   function renderLogin() {
     const l = state.login;
@@ -855,6 +1011,12 @@
     },
     game(el) { state.sheet = el.dataset.id; state.game = null; render(); loadDetail(false).then(render); },
     'close-game'() { state.sheet = null; state.game = null; render(); },
+    'req-tab'(el) { state.tabs.requests = el.dataset.v; render(); },
+    'copy-feedback'() {
+      const f = state.detail;
+      if (!f) return;
+      copy([f.message, `${new Date(f.t * 1000).toISOString()} · ${f.place} · v${f.version} · ${f.priority}`, f.logs].filter(Boolean).join('\n\n'), 'Feedback');
+    },
     'all-tables'() { state.allTables = !state.allTables; render(); },
     words() { state.showWords = !state.showWords; render(); },
     whole() { state.wordWhole = !state.wordWhole; render(); },

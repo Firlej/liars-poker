@@ -152,6 +152,19 @@ problem). The login cookie lasts 30 days; each wrong password locks that
 address for 10 s, longer after five, and 30 misses in an hour lock the login
 for everyone for 5 minutes.
 
+The Product pages:
+
+- **Feedback** reads the app's feedback and crash reports from PocketBase
+  (`feedbacks` collection, `source = "liars-poker-app"`). They stay in
+  PocketBase, which keeps taking reports when this server is down. Set
+  `FEEDBACK_PB_URL`, `FEEDBACK_PB_EMAIL` and `FEEDBACK_PB_PASSWORD` (a
+  PocketBase user that may only list and view `feedbacks`) in
+  `/etc/liars-poker.env`. It is read at most once a minute; mark messages
+  resolved in PocketBase.
+- **Changelog** and **Requests** come from `server/admin_data/changelog.json`
+  and `requests.json`, written by hand from the git history and the GitHub
+  project board. Edit them and deploy; each file's `note` explains its fields.
+
 To look at it with made-up data, fill a separate file and point a local server at it:
 
 ```bash

@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Dict, Optional, Tuple
 from urllib.parse import parse_qs, unquote
 
-from . import names, rules
+from . import feedback, names, rules
 from .dashboard import Live, Reader
 from .rooms import LobbyError
 
@@ -38,6 +38,8 @@ if TYPE_CHECKING:
 log = logging.getLogger("liars_poker.admin")
 
 STATIC = Path(__file__).with_name("admin_static")
+#: Hand-written changelog and requests (see the "note" in each file).
+DATA = Path(__file__).with_name("admin_data")
 COOKIE = "lp_admin"
 SESSION_DAYS = 30
 MAX_BODY = 16_000
@@ -51,7 +53,7 @@ GLOBAL_LOCK = 300.0
 MUTE_SECONDS = 3600.0
 
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-       "font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; "
+       "font-src https://fonts.gstatic.com; img-src 'self' data: {files}; media-src {files}; connect-src 'self'; "
        "frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 SECURITY_HEADERS = [
     (b"x-content-type-options", b"nosniff"), (b"x-frame-options", b"DENY"),
@@ -158,6 +160,7 @@ class Admin:
             self.tz = timezone.utc
         #: Page files, read again when they change on disk: name -> (mtime, body, type).
         self.static: Dict[str, Tuple[float, bytes, str]] = {}
+        self.feedback = feedback.FeedbackSource.from_env()
         if server.store is not None:
             names.set_custom((w, whole) for w, whole, _ in server.store.blocked_words())
 
@@ -175,7 +178,9 @@ class Admin:
             return await self._send(send, 404, {"ok": False, "error": "not_found"})
         if path in ("/admin", "/admin/"):
             body, _ = self._file("index.html") or (b"", "")
-            return await self._raw(send, 200, body, "text/html; charset=utf-8", [(b"content-security-policy", CSP.encode())])
+            # Feedback screenshots load straight from PocketBase (no referrer is sent).
+            csp = CSP.format(files=self.feedback.url or "'none'")
+            return await self._raw(send, 200, body, "text/html; charset=utf-8", [(b"content-security-policy", csp.encode())])
         if path.startswith("/admin/static/"):
             item = self._file(path.rsplit("/", 1)[-1])
             if item is None:
@@ -312,6 +317,14 @@ class Admin:
                 return await self._read(lambda r: r.moderation(tab or "open", False))
             if head == "moderation":
                 return await self._read(lambda r: r.moderation_detail(rest[0]))
+            if head == "feedback" and not rest:
+                return await self._read(lambda r: feedback.page(self.feedback, tab or "open", q, time.time()))
+            if head == "feedback":
+                return await self._read(lambda r: feedback.detail(self.feedback, rest[0]))
+            if head == "changelog":
+                return await self._read(lambda r: _data("changelog.json"))
+            if head == "requests":
+                return await self._read(lambda r: self._requests())
         if method == "POST":
             if head == "logout":
                 self.server.store.end_session(_token_hash(token))
@@ -371,12 +384,25 @@ class Admin:
                 if "live_tables" in data:
                     data["live_tables"] = [{**t, "players": [reader.player(p) for p in t["players"]]}
                                            for t in data["live_tables"]]
-                return {"ok": True, "data": data, "shell": reader.shell()}
+                shell = reader.shell()
+                shell["feedback_open"] = feedback.open_count(self.feedback)
+                return {"ok": True, "data": data, "shell": shell}
             finally:
                 db.close()
 
         result = await asyncio.to_thread(run)
         return (200, result) if result else (404, {"ok": False, "error": "not_found"})
+
+    def _requests(self) -> dict:
+        """The board, with each request's feedback messages filled in from PocketBase."""
+        data = _data("requests.json")
+        by_id = {i["id"]: i for i in self.feedback.items()} if self.feedback.enabled else {}
+        for item in data["items"]:
+            item["feedback"] = [{"id": f, "t": by_id[f]["t"], "message": by_id[f]["message"][:280]} if f in by_id
+                                else {"id": f, "t": None, "message": None} for f in item.get("feedback", [])]
+            if item.get("issue"):
+                item["url"] = f"{data['repo']}/issues/{item['issue']}"
+        return data
 
     # ----- actions -------------------------------------------------------
 
@@ -441,6 +467,10 @@ class Admin:
         else:
             return 400, {"ok": False, "error": "bad_request"}
         return 200, {"ok": True}
+
+
+def _data(name: str) -> dict:
+    return json.loads((DATA / name).read_text(encoding="utf-8"))
 
 
 def _token_hash(token: str) -> str:

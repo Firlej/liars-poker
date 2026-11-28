@@ -1,0 +1,99 @@
+{
+  "note": "Written by hand from the git history of the app and the server. Newest first. kind: new | better | fix. area: app | server.",
+  "updated": "2026-11-28",
+  "releases": [
+    {
+      "version": "Next",
+      "date": null,
+      "title": "Training, a fuller profile, and safer names",
+      "status": "unreleased",
+      "items": [
+        {"kind": "new", "area": "app", "text": "Training: play against bots on your phone, with no turn timer", "date": "2026-11-26"},
+        {"kind": "new", "area": "app", "text": "Profile: play style map, key numbers and a full statistics page", "date": "2026-11-26"},
+        {"kind": "new", "area": "app", "text": "Pick the side margins yourself: 0, 4, 8, 12 or 16", "date": "2026-11-26"},
+        {"kind": "new", "area": "app", "text": "Report a player, and block them so you don't see their reactions", "date": "2026-11-27"},
+        {"kind": "new", "area": "server", "text": "Offensive names are refused, with look-alikes like f.u.c.k caught too", "date": "2026-11-27"},
+        {"kind": "new", "area": "server", "text": "Admin dashboard with stats, moderation and problems", "date": "2026-11-27"},
+        {"kind": "better", "area": "app", "text": "Bet picker as a list of hands, with the turn timer back under your hand", "date": "2026-11-27"},
+        {"kind": "better", "area": "app", "text": "Stat cards explain themselves in a sheet from the bottom", "date": "2026-11-27"},
+        {"kind": "better", "area": "app", "text": "The final check plays out before the winner is named", "date": "2026-11-25"},
+        {"kind": "better", "area": "app", "text": "Old phone apps are asked to update", "date": "2026-11-25"},
+        {"kind": "fix", "area": "app", "text": "The header back button works again on iOS 26", "date": "2026-11-25"}
+      ]
+    },
+    {
+      "version": "1.3.0",
+      "date": "2026-11-25",
+      "title": "How to play, a new profile, and reactions",
+      "status": "released",
+      "items": [
+        {"kind": "new", "area": "app", "text": "How to play: a guided tour with four practice hands"},
+        {"kind": "new", "area": "app", "text": "Quick reactions: send a phrase or an emoji to the table"},
+        {"kind": "new", "area": "app", "text": "New profile with stats, an emote picker and card decks"},
+        {"kind": "new", "area": "app", "text": "Super dark: an optional pure black dark mode"},
+        {"kind": "new", "area": "app", "text": "Experimental table view, and Advanced sections in the game menu"},
+        {"kind": "new", "area": "server", "text": "Fun names for new rooms and bots"},
+        {"kind": "better", "area": "app", "text": "Cards in your hand are sorted from low to high"},
+        {"kind": "better", "area": "app", "text": "Interface polish: 16 pt margins, an open seat, a clearer header"},
+        {"kind": "better", "area": "server", "text": "17 emoji and \"Loser!\" as reactions"}
+      ]
+    },
+    {
+      "version": "1.2.0",
+      "date": "2026-11-23",
+      "title": "The big rebuild",
+      "status": "released",
+      "items": [
+        {"kind": "new", "area": "app", "text": "A new look: theme, table view, bet picker and hand panel"},
+        {"kind": "new", "area": "app", "text": "Light theme, and a theme switch in the game menu"},
+        {"kind": "new", "area": "app", "text": "Join a room with a 6-letter code, a link or a QR code"},
+        {"kind": "new", "area": "app", "text": "New app icon and splash screen"},
+        {"kind": "new", "area": "app", "text": "Landing page at /home that explains the game"},
+        {"kind": "new", "area": "app", "text": "The host picks the card limit for the table"},
+        {"kind": "new", "area": "server", "text": "A rewritten game server that keeps games going on bad connections"},
+        {"kind": "better", "area": "app", "text": "The reveal is staged: matching cards lift and the winning cards light up"},
+        {"kind": "better", "area": "app", "text": "The name of the player whose turn it is grows"},
+        {"kind": "better", "area": "app", "text": "Two pair and full house are picked in two steps"},
+        {"kind": "better", "area": "app", "text": "A countdown shows when the next deal starts"},
+        {"kind": "better", "area": "server", "text": "The pause before the next deal is 10 seconds"},
+        {"kind": "fix", "area": "app", "text": "The bet picker is off when it isn't your turn"},
+        {"kind": "fix", "area": "app", "text": "Room links join once connected instead of saying unavailable"},
+        {"kind": "fix", "area": "app", "text": "Feedback form errors show inside the form"}
+      ]
+    },
+    {
+      "version": "1.1.0",
+      "date": "2025-11-27",
+      "title": "Bots, spectators and bug reports",
+      "status": "released",
+      "items": [
+        {"kind": "new", "area": "app", "text": "Add bots to a room", "date": "2025-11-27"},
+        {"kind": "new", "area": "app", "text": "Spectator mode: watch a game you're not in", "date": "2025-11-27"},
+        {"kind": "new", "area": "app", "text": "Send a bug report with the app's logs", "date": "2025-11-28"},
+        {"kind": "new", "area": "app", "text": "Shuffle the players before a game", "date": "2025-11-28"},
+        {"kind": "new", "area": "app", "text": "Game instructions, in English and Polish", "date": "2025-12-27"},
+        {"kind": "new", "area": "app", "text": "Links to the phone apps on the website", "date": "2026-01-02"},
+        {"kind": "new", "area": "app", "text": "Share the app from the menu", "date": "2026-01-05"},
+        {"kind": "new", "area": "app", "text": "Connection status, a turn timer and reconnecting", "date": "2026-01-17"},
+        {"kind": "new", "area": "server", "text": "Turn timeout, heartbeat and reconnection for poor connections", "date": "2026-01-17"},
+        {"kind": "better", "area": "app", "text": "Toasts tell you whose turn it is", "date": "2025-11-25"},
+        {"kind": "better", "area": "app", "text": "Compact game view", "date": "2025-12-12"},
+        {"kind": "fix", "area": "server", "text": "Bots no longer stall after a deal or when someone is knocked out", "date": "2025-11-28"}
+      ]
+    },
+    {
+      "version": "1.0",
+      "date": "2025-02-07",
+      "title": "First playable version",
+      "status": "released",
+      "items": [
+        {"kind": "new", "area": "app", "text": "Play Liar's Poker online with friends"},
+        {"kind": "new", "area": "app", "text": "Accounts, a profile with an avatar, and a list of rooms"},
+        {"kind": "new", "area": "app", "text": "Card animations and haptics"},
+        {"kind": "new", "area": "app", "text": "Dark mode, then a theme switch (Nov 2025)"},
+        {"kind": "new", "area": "app", "text": "Send feedback from the app (Nov 2025)"},
+        {"kind": "new", "area": "server", "text": "Online game server with rooms and a queue"}
+      ]
+    }
+  ]
+}
