@@ -108,6 +108,15 @@ async def test_login_pages_and_actions(tmp_path):
                 for rng in ("24h", "7d", "30d", "all"):
                     status, body = await admin.get(f"{page}?range={rng}")
                     assert status == 200 and body["ok"], (page, rng, body)
+            # Product pages: feedback isn't connected in tests; the other two are hand-written files.
+            status, body = await admin.get("feedback")
+            assert status == 200 and body["data"]["setup"] is False and body["shell"]["feedback_open"] is None
+            status, body = await admin.get("changelog")
+            assert body["data"]["releases"][0]["items"]
+            status, body = await admin.get("requests")
+            done = [i for i in body["data"]["items"] if i["status"] == "done" and i.get("issue")]
+            assert done[0]["url"].endswith(f"/issues/{done[0]['issue']}")
+            assert all(f["message"] is None for i in body["data"]["items"] for f in i["feedback"])
             status, body = await admin.get("overview")
             assert body["data"]["live"]["online"] == 2 and body["shell"]["reports_open"] == 1
             status, body = await admin.get("games")
