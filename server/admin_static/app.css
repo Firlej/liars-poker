@@ -152,11 +152,23 @@ button:disabled { cursor: default; }
 .statgrid > div { padding: 22px 16px; min-width: 0; }
 .statgrid > div:nth-child(odd) { border-right: 1px solid var(--border); }
 .statgrid > div:nth-child(-n+2) { border-bottom: 1px solid var(--border); }
-/* Overview: the games chart grows so its baseline lines up with the bottom of the stats beside it */
-@media (min-width: 900px) {
-  .chart-fill { display: flex; flex-direction: column; }
-  .chart-fill > [data-chart] { flex: 1; height: auto; min-height: 250px; }
-  .chart-fill > .groups > .chart { height: auto; }
+/* Overview: numbers beside the games chart, whose baseline lines up with the last number.
+   Each cell is a container, so a narrow cell (a medium window) stacks them instead. */
+.cell { container-type: inline-size; }
+.games-split { display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 28px; margin-top: 20px; }
+.chart-fill { display: flex; flex-direction: column; }
+.chart-fill > [data-chart] { flex: 1; height: auto; min-height: 250px; }
+.chart-fill > .groups > .chart { height: auto; }
+@container (max-width: 640px) {
+  .games-split { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .games-split .statcol { grid-template-columns: 1fr 1fr; gap: 0 20px; }
+  .games-split .statcol > div, .games-split .statcol > div:first-child { padding: 14px 0; }
+  .games-split .statcol > div:nth-child(-n+2) { border-bottom: 1px solid var(--border); }
+  .games-split .statcol > div:nth-child(n+3) { border-bottom: 0; }
+  .chart-fill > [data-chart] { flex: none; height: 220px; min-height: 0; }
+  .panel-head { flex-wrap: wrap; }
+  .panel-head .legend { margin-left: 0; width: 100%; margin-top: 10px; }
+  .table .wide { display: none; }
 }
 
 /* gauge */
@@ -392,6 +404,7 @@ a.btn.primary { color: var(--inv-text); }
   .kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .kpi:nth-child(4) { border-left: 0; }
   .kpi:nth-child(n+4) { border-top: 1px solid var(--border); }
+  .kpi:nth-child(5):last-child { grid-column: span 2; }
 }
 @media (max-width: 900px) {
   body { padding-bottom: calc(76px + env(safe-area-inset-bottom)); }
