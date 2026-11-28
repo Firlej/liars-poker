@@ -143,6 +143,15 @@ button:disabled { cursor: default; }
 .tip .sq { margin-right: 6px; }
 .groups { display: flex; gap: 12px; }
 .groups .chart { flex: 1; }
+.tipcard { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 18px 0 22px; padding: 14px 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 7px; min-height: 84px; }
+.tipcard b { display: block; margin-top: 6px; font: 400 18px/1.3 var(--sans); }
+.tipcard .rows { display: grid; gap: 4px; font: 400 10.5px var(--mono); }
+.tipcard .rows .sq { margin-right: 8px; }
+.tipcard .rows .bad { color: var(--red); }
+.statgrid { display: grid; grid-template-columns: 1fr 1fr; }
+.statgrid > div { padding: 22px 16px; min-width: 0; }
+.statgrid > div:nth-child(odd) { border-right: 1px solid var(--border); }
+.statgrid > div:nth-child(-n+2) { border-bottom: 1px solid var(--border); }
 /* Overview: the games chart grows so its baseline lines up with the bottom of the stats beside it */
 @media (min-width: 900px) {
   .chart-fill { display: flex; flex-direction: column; }
@@ -369,7 +378,7 @@ button:disabled { cursor: default; }
   .heat { grid-template-columns: 30px repeat(24, 1fr); gap: 2px; }
   .heat i { height: 14px; }
   .groups { gap: 6px; }
-  .legend { margin-left: 0; width: 100%; }
+  .legend { margin-left: 0; width: 100%; margin-top: 14px; }
   .panel-head { flex-wrap: wrap; }
   .addword { flex-wrap: wrap; }
   .addword .field { flex-basis: 100%; }

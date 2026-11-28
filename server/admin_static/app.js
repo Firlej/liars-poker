@@ -330,6 +330,13 @@
     return bars.map(col);
   }
 
+  function tipCard(i) {
+    const t = state.tipData?.[i];
+    if (!t) return '';
+    return `<div><div class="eyebrow">${esc(t.label)}</div><b>${esc(t.total)}</b></div>
+      <div class="rows">${t.rows.map(([c, text]) => `<div${c === 'var(--red)' ? ' class="bad"' : ''}><i class="sq" style="background:${c}"></i>${esc(text)}</div>`).join('')}</div>`;
+  }
+
   function gamesChart(chart) {
     const step = chart.step;
     const label = (b) => {
@@ -409,20 +416,31 @@
     const shade = (v) => (v ? `color-mix(in srgb, var(--text) ${Math.round(12 + (v / maxHeat) * 88)}%, var(--bg))` : 'var(--track)');
     const cb = d.coming_back;
     const rangeTitle = { '24h': 'Last 24 hours', '7d': 'Last 7 days', '30d': 'Last 30 days', all: 'All time' }[state.range];
-    return `<div class="grid">
-      <section class="cell">
-        <div class="panel-head"><span class="title">Games · ${rangeTitle}</span>
-          <div class="legend"><span><i class="sq" style="background:var(--bar)"></i>Real players</span><span><i class="sq" style="background:var(--bar-soft)"></i>With bots</span><span><i class="sq" style="background:var(--red)"></i>Abandoned</span></div></div>
-        <div style="display:grid;grid-template-columns:${phone() ? '1fr' : '190px minmax(0,1fr)'};gap:28px;margin-top:20px">
-          <div class="statcol" style="${phone() ? 'grid-template-columns:1fr 1fr;gap:0 16px' : ''}">
+    const stats = `
             <div><div class="eyebrow">Games played</div><div class="huge" style="margin-top:10px">${fmt(k.games)}</div>${delta(k.games, k.games_prev)}</div>
             <div><div class="eyebrow">Players</div><div class="huge" style="margin-top:10px">${fmt(k.players)}</div>${delta(k.players, k.players_prev)}</div>
             <div><div class="eyebrow">Avg game length</div><div class="huge" style="margin-top:10px">${dur(k.avg_game)}</div>${delta(k.avg_game, k.avg_game_prev, { kind: 'dur' })}</div>
-            <div><div class="eyebrow">Came back next day</div><div class="huge" style="margin-top:10px">${pct(k.next_day)}</div>${delta(k.next_day, k.next_day_prev, { kind: 'pt' })}</div>
+            <div><div class="eyebrow">Came back next day</div><div class="huge" style="margin-top:10px">${pct(k.next_day)}</div>${delta(k.next_day, k.next_day_prev, { kind: 'pt' })}</div>`;
+    const legend = `<div class="legend"><span><i class="sq" style="background:var(--bar)"></i>Real players</span><span><i class="sq" style="background:var(--bar-soft)"></i>With bots</span><span><i class="sq" style="background:var(--red)"></i>Abandoned</span></div>`;
+    // Phone: the four numbers get their own 2x2 block, then the chart with its legend
+    // and a card for the tapped bar (the latest one to start with).
+    const gamesBlock = phone()
+      ? `<section class="cell flush"><div class="statgrid">${stats}</div></section>
+      <section class="cell">
+        <div class="panel-head"><span class="title">Games · ${rangeTitle}</span></div>
+        ${legend}
+        ${(() => { const chart = gamesChart(d.chart); return `<div class="tipcard" data-tipcard>${tipCard(Math.max(0, d.chart.bars.map((b) => b.real + b.bots + b.abandoned > 0).lastIndexOf(true)))}</div><div style="position:relative">${chart}</div>`; })()}
+      </section>`
+      : `<section class="cell">
+        <div class="panel-head"><span class="title">Games · ${rangeTitle}</span>${legend}</div>
+        <div style="display:grid;grid-template-columns:190px minmax(0,1fr);gap:28px;margin-top:20px">
+          <div class="statcol">${stats}
           </div>
           <div class="chart-fill" style="position:relative">${gamesChart(d.chart)}</div>
         </div>
-      </section>
+      </section>`;
+    return `<div class="grid">
+      ${gamesBlock}
       <section class="cell">
         <div class="panel-head"><span class="title">Live now</span></div>
         ${gauge(live.online, live.record)}
@@ -938,6 +956,13 @@
     const old = document.querySelector('.tip');
     if (old) old.remove();
     if (!col || !state.tipData) return;
+    const card = col.closest('section')?.querySelector('[data-tipcard]');
+    if (card) {
+      card.innerHTML = tipCard(Number(col.dataset.tip));
+      for (const c of col.parentElement.closest('[data-chart]').querySelectorAll('.col.hot')) c.classList.remove('hot');
+      col.classList.add('hot');
+      return;
+    }
     const t = state.tipData[Number(col.dataset.tip)];
     if (!t) return;
     const host = col.closest('[data-chart]').parentElement;
