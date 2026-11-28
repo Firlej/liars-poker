@@ -472,7 +472,7 @@
       </section>`
       : `<section class="cell">
         <div class="panel-head"><span class="title">Games · ${rangeTitle}</span>${legend}</div>
-        <div style="display:grid;grid-template-columns:190px minmax(0,1fr);gap:28px;margin-top:20px">
+        <div class="games-split">
           <div class="statcol">${stats}
           </div>
           <div class="chart-fill" style="position:relative">${gamesChart(d.chart)}</div>
