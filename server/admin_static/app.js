@@ -420,7 +420,7 @@
             <div><div class="eyebrow">Avg game length</div><div class="huge" style="margin-top:10px">${dur(k.avg_game)}</div>${delta(k.avg_game, k.avg_game_prev, { kind: 'dur' })}</div>
             <div><div class="eyebrow">Came back next day</div><div class="huge" style="margin-top:10px">${pct(k.next_day)}</div>${delta(k.next_day, k.next_day_prev, { kind: 'pt' })}</div>
           </div>
-          <div style="position:relative">${gamesChart(d.chart)}</div>
+          <div class="chart-fill" style="position:relative">${gamesChart(d.chart)}</div>
         </div>
       </section>
       <section class="cell">

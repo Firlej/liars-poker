@@ -143,6 +143,12 @@ button:disabled { cursor: default; }
 .tip .sq { margin-right: 6px; }
 .groups { display: flex; gap: 12px; }
 .groups .chart { flex: 1; }
+/* Overview: the games chart grows so its baseline lines up with the bottom of the stats beside it */
+@media (min-width: 900px) {
+  .chart-fill { display: flex; flex-direction: column; }
+  .chart-fill > [data-chart] { flex: 1; height: auto; min-height: 250px; }
+  .chart-fill > .groups > .chart { height: auto; }
+}
 
 /* gauge */
 .gauge { display: grid; justify-items: center; margin-top: 8px; position: relative; }
